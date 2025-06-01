@@ -1,0 +1,8 @@
+{
+    "mode": "backtest",
+    "symbol": "SOL",
+    "timeframe": "1h",
+    "data_source": "local",
+    "data_path": "C:/Users/mazhao/Desktop/MAutoTrader/回测数据测试集", 
+    "capital": 10000
+}
