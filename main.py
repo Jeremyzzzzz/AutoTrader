@@ -1,25 +1,33 @@
 import pandas as pd
 import argparse
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime, timedelta
 from strategy import BaseStrategy
-from ma_crossover_strategy import MACrossoverStrategy
+# from strategys.ma_crossover_strategy import MACrossoverStrategy
+from strategys.fib_retracement_strategy import FibRetracementStrategy
 from data_adapter import DataAdapter
 from trading_engine import TradingEngine
 import time
 import json
 def main():
+    import asyncio
+    import sys
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='Cryptocurrency Trading System')
-    parser.add_argument('--config', type=str, required=True, help='Path to config file')
+    config_path = r'C:\Users\mazhao\Desktop\MAutoTrader\config.json'
     args, _ = parser.parse_known_args()
     
-    # 加载JSON配置文件（添加编码参数）
-    with open(args.config, encoding='utf-8') as f:  # <-- 这里添加encoding参数
+    # 加载配置文件
+    with open(config_path, encoding='utf-8') as f:
         config = json.load(f)
-    
-    # 合并命令行参数和配置文件参数（命令行参数优先）
+
+    # 创建主解析器（移除--config参数）
     parser = argparse.ArgumentParser(description='Cryptocurrency Trading System')
-    parser.add_argument('--config', type=str, required=True, help='Path to config file')
     parser.add_argument('--mode', choices=['backtest', 'live'], help='Run mode')
     parser.add_argument('--symbol', help='Trading symbol')
     parser.add_argument('--timeframe', help='Kline timeframe')
@@ -30,6 +38,7 @@ def main():
     parser.add_argument('--capital', type=float, help='Initial capital')
     
     # 使用配置文件中的值作为默认值
+    args = parser.parse_args(namespace=argparse.Namespace(**config))
     args = parser.parse_args(namespace=argparse.Namespace(**config))
     
     # 参数验证
@@ -47,14 +56,15 @@ def main():
     }
     
     # 创建策略实例
-    strategy = MACrossoverStrategy(strategy_config)
+    strategy = FibRetracementStrategy(strategy_config)
     
     # 创建数据适配器
     data_adapter = DataAdapter(
         source=args.data_source,
         path=args.data_path,
         api_key=args.api_key,
-        api_secret=args.api_secret
+        api_secret=args.api_secret,
+        mode=args.mode
     )
     
     # 创建交易引擎
@@ -68,7 +78,7 @@ def main():
     if args.mode == 'backtest':
         # 回测配置
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=90)
+        start_date = end_date - timedelta(days=900)
         
         print(f"Starting backtest for {args.symbol} from {start_date} to {end_date}")
         

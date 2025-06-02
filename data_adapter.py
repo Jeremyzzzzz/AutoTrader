@@ -9,10 +9,11 @@ class DataAdapter:
     SOURCE_LOCAL = 'local'
     SOURCE_BINANCE = 'binance'
     
-    def __init__(self, source, path=None, api_key=None, api_secret=None):
+    def __init__(self, source, path=None, api_key=None, api_secret=None, mode='backtest'):
         self.source = source
         self.path = path
-        self.binance_client = Client(api_key, api_secret) if api_key and api_secret else None
+        if mode != 'backtest':
+            self.binance_client = Client(api_key, api_secret) if api_key and api_secret else None
         
         # 创建本地存储目录
         if source == self.SOURCE_LOCAL and path and not os.path.exists(path):

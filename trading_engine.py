@@ -2,11 +2,34 @@ import pandas as pd
 import numpy as np
 import time
 from binance.ws.streams import BinanceSocketManager
+from binance import ThreadedWebsocketManager
 from binance.client import Client
 from threading import Thread
 import logging
 import os
 from datetime import datetime  # 添加这行
+import asyncio
+from threading import Event  # 新增事件控制
+from datetime import timedelta
+
+def calculate_shadow_indicators(df):
+    """计算影线相关指标"""
+    df['body_size'] = (df['close'] - df['open']).abs()
+    df['upper_shadow'] = df['high'] - df[['open', 'close']].max(axis=1)
+    df['lower_shadow'] = df[['open', 'close']].min(axis=1) - df['low']
+    return df
+def process_kline_data(klines):
+    df = pd.DataFrame(klines, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_volume', 'trades',
+        'taker_buy_base', 'taker_buy_quote', 'ignore'
+    ])
+    # 修复：将volume加入数值类型转换
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    df[numeric_cols] = df[numeric_cols].astype(float)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return calculate_shadow_indicators(df)
+    
 class TradingEngine:
     MODE_BACKTEST = 'backtest'
     MODE_LIVE = 'live'
@@ -87,80 +110,99 @@ class TradingEngine:
         return self.performance
     
     def run_live(self, api_key, api_secret):
-        """运行实盘交易"""
+        """运行实盘交易（改用REST API轮询）"""
         if self.mode != self.MODE_LIVE:
             raise RuntimeError("Engine not in live mode")
         
-        self.binance_client = Client(api_key, api_secret)
-        self.ws_manager = BinanceSocketManager(self.binance_client)
-        
-        # 加载初始历史数据
-        self._load_initial_data()
-        
-        # 启动WebSocket
-        self.running = True
-        self.conn_key = self.ws_manager.start_kline_socket(
-            symbol=self.strategy.symbol,
-            interval=self.strategy.timeframe,
-            callback=self._handle_socket_message
+        # 初始化期货客户端
+        self.binance_client = Client(
+            api_key,
+            api_secret,
+            testnet=False,
+            tld='com'
         )
         
-        # 在单独的线程中启动WebSocket
-        self.ws_thread = Thread(target=self.ws_manager.start)
-        self.ws_thread.daemon = True
-        self.ws_thread.start()
+        # 创建停止事件
+        self.stop_event = Event()
         
-        self.logger.info("Live trading started")
+        # 启动轮询线程
+        self.polling_thread = Thread(target=self._polling_worker)
+        self.polling_thread.start()
+        
+        self.running = True
+        self.logger.info("Live trading started (REST API mode)")
+
+    def _polling_worker(self):
+        """轮询工作线程（使用winMoney的分页获取逻辑）"""
+        while not self.stop_event.is_set():
+            try:
+                symbol = self.strategy.symbol + "USDT"
+                interval = self.strategy.timeframe
+                print(f"symbol is ===>{symbol}")
+                # 计算时间范围（获取最近3天数据）
+                end_dt = datetime.now()
+                start_dt = end_dt - timedelta(days=3)
+                end_ts = int(end_dt.timestamp() * 1000)
+                start_ts = int(start_dt.timestamp() * 1000)
+                
+                # 分页获取K线数据（与winMoney.py保持一致）
+                klines = []
+                while True:
+                    chunk = self.binance_client.futures_klines(
+                        symbol=symbol,
+                        interval=interval,
+                        startTime=start_ts,
+                        endTime=end_ts,
+                        limit=500
+                    )
+                    if not chunk:
+                        break
+                    klines.extend(chunk)
+                    start_ts = chunk[-1][0] + 1  # 更新起始时间为最后一条K线时间+1ms
+                    if start_ts >= end_ts:
+                        break
+                
+                # 处理数据（使用winMoney的处理方式）
+                df = process_kline_data(klines)
+                df = df[-200:]  # 保留最近200根K线
+                
+                # 更新策略数据
+                self.strategy.update_data(df)
+                
+                # 获取信号（后续逻辑保持不变）
+
+                signal = self.strategy.get_latest_signal()
+                if signal:
+                    self._execute_real_trade(signal)
+                print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                # 间隔与策略周期一致（例如1小时策略间隔3600秒）
+                self.stop_event.wait(60)
+
+            except Exception as e:
+                self.logger.error(f"数据获取异常: {str(e)}")
+                time.sleep(60)
     
+    def _process_klines(self, klines):
+        """处理币安K线数据为DataFrame"""
+        columns = ['timestamp','open','high','low','close','volume',
+                 'close_time','quote_volume','trades',
+                 'taker_buy_base','taker_buy_quote','ignore']
+        
+        df = pd.DataFrame(klines, columns=columns)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        numeric_cols = ['open','high','low','close','volume']
+        df[numeric_cols] = df[numeric_cols].astype(float)
+        return df
+
     def stop(self):
         """停止交易引擎"""
-        if self.mode == self.MODE_LIVE and self.ws_manager:
-            self.ws_manager.stop_socket(self.conn_key)
+        if self.mode == self.MODE_LIVE and self.running:
+            self.stop_event.set()
+            self.polling_thread.join()
             self.running = False
             self.logger.info("Live trading stopped")
-    
-    def _load_initial_data(self):
-        """加载初始历史数据预热策略"""
-        end = pd.Timestamp.now()
-        start = end - pd.Timedelta(days=30)
-        
-        data = self.data_adapter.load_data(
-            self.strategy.symbol,
-            self.strategy.timeframe,
-            start,
-            end
-        )
-        
-        # 用历史数据预热策略
-        self.strategy.update_data(data)
-        self.logger.info(f"Loaded {len(data)} historical data points for initialization")
-    
-    def _handle_socket_message(self, msg):
-        """处理WebSocket消息"""
-        if msg['e'] == 'kline' and msg['k']['x']:  # 确认K线闭合
-            kline = msg['k']
-            candle = {
-                'timestamp': pd.to_datetime(kline['t'], unit='ms'),
-                'open': float(kline['o']),
-                'high': float(kline['h']),
-                'low': float(kline['l']),
-                'close': float(kline['c']),
-                'volume': float(kline['v'])
-            }
-            
-            # 转换为DataFrame
-            new_data = pd.DataFrame([candle]).set_index('timestamp')
-            
-            # 更新策略
-            self.strategy.update_data(new_data)
-            
-            # 获取信号
-            signal = self.strategy.get_latest_signal()
-            if signal:
-                self.logger.info(f"New signal: {signal['signal']} at {signal['price']}")
-                # 执行交易
-                self._execute_real_trade(signal['signal'], signal['price'])
-    
+
     def _execute_trade(self, signal_info, current_time):
         """在回测中执行多空交易"""
         current_timestamp = self.strategy.data.index[-1]
@@ -168,7 +210,8 @@ class TradingEngine:
         take_profit = signal_info['take_profit']
         stop_loss = signal_info['stop_loss']
         signal_type = signal_info.get('signal_type', 'manual')  # 新增信号类型字段
-        print(f"if signal_info['signal'] is ==>{signal_info['signal']}")
+        take_profit = signal_info['take_profit']
+        # print(f"current_timestamp is ==>{current_timestamp},  signal_info['signal'] is ==>{signal_info['signal']}, price is =>{price}, take_profit is =>{take_profit}, stop_loss is =>{stop_loss}, signal_type is =>{signal_type}")
         current_price = self.strategy.data['close'].iloc[-1]
         # 检查持仓的止盈止损
         if self.position != 0:
@@ -186,7 +229,7 @@ class TradingEngine:
         # 处理新信号
         if signal_info['signal'] == '做多' and self.position == 0 and current_price <= price:
             # 记录止损止盈价格（示例：3%止盈，2%止损）
-            entry_price = price
+            entry_price = current_price
             self.take_profit = take_profit
             self.stop_loss = stop_loss
             
@@ -216,7 +259,7 @@ class TradingEngine:
             
             self._open_position(
                 trade_type='做空',
-                price=entry_price,
+                price=current_price,
                 quantity=-quantity,
                 take_profit=self.take_profit,
                 stop_loss=self.stop_loss,
@@ -225,6 +268,12 @@ class TradingEngine:
 
     def _open_position(self, trade_type, price, quantity, take_profit, stop_loss, timestamp):
         """统一处理开仓逻辑"""
+        print(f"\n=== {trade_type}开仓 ===")
+        print(f"时间: {timestamp.strftime('%Y-%m-%d %H:%M')}")
+        print(f"合约: {self.strategy.symbol}")
+        print(f"方向: {trade_type} | 价格: {price:.4f}")
+        print(f"数量: {abs(quantity):.4f} | 止盈: {take_profit:.4f} | 止损: {stop_loss:.4f}")
+        
         self.trades.append({
             'timestamp': timestamp,
             '类型': trade_type,
@@ -240,6 +289,11 @@ class TradingEngine:
 
     def _close_position(self, close_type, price, timestamp):
         """统一处理平仓逻辑"""
+        print(f"\n=== 平仓操作 ===")
+        print(f"时间: {timestamp.strftime('%Y-%m-%d %H:%M')}")
+        print(f"类型: {close_type} | 价格: {price:.4f}")
+        print(f"入场价: {self.entry_price:.4f} | 盈亏: {price - self.entry_price:.4f}")
+        
         close_quantity = abs(self.position)
         fee = close_quantity * price * 0.0002
         proceeds = close_quantity * price - fee
@@ -258,83 +312,73 @@ class TradingEngine:
         self.capital += proceeds
         self.total_profit += self.trades[-1]['收益']
 
-    def _execute_real_trade(self, signal, price):
-        """在实盘中执行交易"""
+    def _execute_real_trade(self, signal_info):
+        """实盘交易执行（完整版）"""
         try:
-            symbol = self.strategy.symbol
+            from trade_controller import place_order
+            price = signal_info['price']
+            take_profit = signal_info['take_profit']
+            stop_loss = signal_info['stop_loss']
+            signal_type = signal_info.get('signal_type', 'manual')  # 新增信号类型字段
+            take_profit = signal_info['take_profit']
+            symbol = self.strategy.symbol + "USDT"
+            # 从策略中获取止损止盈参数
+
+            # 获取账户余额
+            if self.position != 0:
+                self.logger.info(f"当前已持有{symbol}仓位，跳过交易")
+                return
+            balance = self.binance_client.futures_account_balance()
+            usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
-            if signal == '做多':
-                # 获取账户余额
-                balance = float(self.binance_client.get_asset_balance(asset='USDT')['free'])
-                
-                if balance <= 10:  # 最小交易金额
-                    self.logger.warning("Insufficient balance for 做多 order")
-                    return
-                
-                # 计算可买入数量（考虑手续费）
-                fee = self.trade_fee
-                quantity = (balance * (1 - fee)) / price
-                
-                # 获取交易对精度
-                info = self.binance_client.get_symbol_info(symbol)
-                step_size = float([f['stepSize'] for f in info['filters'] if f['filterType'] == 'LOT_SIZE'][0])
-                quantity = round(quantity - (quantity % step_size), 8)
-                
-                # 下订单
-                order = self.binance_client.create_order(
-                    symbol=symbol,
-                    side=Client.SIDE_做多,
-                    type=Client.ORDER_TYPE_MARKET,
-                    quantity=quantity
-                )
-                
-                # 更新本地状态
-                self.position += quantity
-                self.capital = balance - (quantity * price)
-                
-                self.logger.info(f"Executed 做多 order: {quantity} at {price}")
-                
-            elif signal == '做空' and self.position > 0:
-                # 获取交易对精度
-                info = self.binance_client.get_symbol_info(symbol)
-                step_size = float([f['stepSize'] for f in info['filters'] if f['filterType'] == 'LOT_SIZE'][0])
-                quantity = round(self.position - (self.position % step_size), 8)
-                
-                if quantity <= 0:
-                    self.logger.warning("Insufficient position for 做空 order")
-                    return
-                
-                # 下订单
-                order = self.binance_client.create_order(
-                    symbol=symbol,
-                    side=Client.SIDE_做空,
-                    type=Client.ORDER_TYPE_MARKET,
-                    quantity=quantity
-                )
-                
-                # 更新账户余额
-                balance = float(self.binance_client.get_asset_balance(asset='USDT')['free'])
-                
-                # 更新本地状态
-                self.capital = balance
-                self.position = 0
-                
-                self.logger.info(f"Executed 做空 order: {quantity} at {price}")
-                
-            # 记录交易
-            if order:
-                self.trades.append({
-                    'timestamp': pd.Timestamp.now(),
-                    'order_id': order['orderId'],
-                    'symbol': symbol,
-                    'side': signal,
-                    'price': float(order['fills'][0]['price']),
-                    'quantity': float(order['executedQty']),
-                    'fee': float(order['fills'][0]['commission'])
-                })
-                
+            # 计算下单数量（使用账户余额的30%）
+            quantity = (usdt_balance * 0.3) / price
+            
+            # 获取交易精度
+            exchange_info = self.binance_client.futures_exchange_info()
+            symbol_info = next(s for s in exchange_info['symbols'] if s['symbol'] == symbol)
+            
+            # 修改后的精度获取逻辑
+            lot_size_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE')
+            price_filter = next(f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER')
+            step_size = float(lot_size_filter['stepSize'])
+            tick_size = float(price_filter['tickSize'])
+            
+            # 调整数量精度
+            quantity = quantity - (quantity % step_size)
+            quantity = round(quantity, 8)
+            
+            # 调整价格精度
+            price = round(price - (price % tick_size), 8)
+            stop_loss = round(stop_loss - (stop_loss % tick_size), 8)
+            take_profit = round(take_profit - (take_profit % tick_size), 8)
+
+            # 确定交易方向
+            side = 'BUY' if signal_info['signal'] == '做多' else 'SELL'
+
+            # 调用trade_controller的place_order
+            success = place_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                stop_loss=stop_loss,
+                take_profit=take_profit
+            )
+
+            if success:
+                self.logger.info(f"订单提交成功 | {symbol} {side} {quantity}@{price}")
+                # 更新本地持仓状态
+                self.position = quantity if side == 'BUY' else -quantity
+                self.entry_price = price
+            else:
+                self.logger.warning("订单提交失败")
+
         except Exception as e:
-            self.logger.error(f"Trade execution failed: {str(e)}")
+            self.logger.error(f"交易执行失败：{str(e)}", exc_info=True)
+            # 失败后取消所有未完成订单
+            from trade_controller import cancel_all_orders
+            cancel_all_orders(symbol)
     
     def _generate_report(self):
         """生成回测报告"""

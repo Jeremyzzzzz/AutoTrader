@@ -99,6 +99,6 @@ def generate_summary_report(trades_file):
 
 # 使用示例
 if __name__ == "__main__":
-    input_file = "C:/Users/mazhao/Desktop/MAutoTrader/回测报告/SOL_trades_20250601_215503.xlsx"
+    input_file = "C:/Users/mazhao/Desktop/MAutoTrader/回测报告/SOL_trades_20250602_225607.xlsx"
     output_file = generate_summary_report(input_file)
     print(f"报告生成完成：{output_file}")
