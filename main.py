@@ -6,7 +6,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime, timedelta
 from strategy import BaseStrategy
 # from strategys.ma_crossover_strategy import MACrossoverStrategy
-from strategys.fib_retracement_strategy import FibRetracementStrategy
+# from strategys.nn_strategy import NNStrategy
+from strategys.nn_strategy import NNStrategy
 from data_adapter import DataAdapter
 from trading_engine import TradingEngine
 import time
@@ -56,7 +57,7 @@ def main():
     }
     
     # 创建策略实例
-    strategy = FibRetracementStrategy(strategy_config)
+    strategy = NNStrategy(strategy_config)
     
     # 创建数据适配器
     data_adapter = DataAdapter(
@@ -78,7 +79,7 @@ def main():
     if args.mode == 'backtest':
         # 回测配置
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=900)
+        start_date = '2024-01-01'
         
         print(f"Starting backtest for {args.symbol} from {start_date} to {end_date}")
         

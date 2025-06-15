@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 from datetime import datetime
 import os
 
@@ -14,11 +16,14 @@ def generate_summary_report(trades_file):
     final_equity = initial_capital + trades_df['收益'].sum()
     total_return = (final_equity - initial_capital) / initial_capital
     
-    # 计算资金曲线
+    # 计算资金曲线（修正版本）
     equity_curve = [initial_capital]
+    valid_timestamps = [trades_df['timestamp'].iloc[0] - pd.DateOffset(days=1)]  # 初始时间戳
+    
     for idx, row in trades_df.iterrows():
         if pd.notnull(row['收益']):
             equity_curve.append(equity_curve[-1] + row['收益'])
+            valid_timestamps.append(row['timestamp'])  # 只记录有收益的交易时间戳
     
     # 时间周期计算
     start_time = trades_df['timestamp'].min()
@@ -45,13 +50,35 @@ def generate_summary_report(trades_file):
     max_drawdown = drawdown.min()
 
     # 生成可视化图表
-    plt.figure(figsize=(12, 6))
-    plt.plot(equity_curve, label='资金曲线')
-    plt.title('资金曲线图')
-    plt.xlabel('交易次数')
-    plt.ylabel('资金量 (USDT)')
-    plt.grid(True)
-    plt.legend()
+    plt.figure(figsize=(16, 8))  # 加宽画布
+    
+    # 获取时间戳列表
+    timestamps = pd.to_datetime(trades_df['timestamp']).tolist()
+    # 资金曲线时间戳对齐（首日补零）
+    timestamps = [timestamps[0] - pd.DateOffset(days=1)] + timestamps
+    
+    # 绘制资金曲线（时间戳与资金点数量对齐）
+    plt.plot(valid_timestamps[:len(equity_curve)], equity_curve, label='资金曲线', linewidth=2)
+    
+    # 设置时间轴格式
+    plt.gca().xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+    plt.gcf().autofmt_xdate()  # 自动旋转日期标签
+    
+    # 添加标签和网格
+    plt.title('资金曲线图（按时间序列）', fontsize=14)
+    plt.xlabel('交易时间', fontsize=12)
+    plt.ylabel('资金量 (USDT)', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # 限制显示密度：每30天一个刻度
+    plt.gca().xaxis.set_major_locator(plt.matplotlib.dates.MonthLocator(interval=1))
+    
+    # 添加最大回撤标注
+    maxdd_idx = drawdown.idxmin()
+    plt.annotate(f'最大回撤: {max_drawdown*100:.1f}%', 
+                xy=(timestamps[maxdd_idx], equity_curve[maxdd_idx]),
+                xytext=(timestamps[maxdd_idx], equity_curve[maxdd_idx]*0.9),
+                arrowprops=dict(facecolor='red', shrink=0.05))
     
     # 保存图表
     chart_path = os.path.join(os.path.dirname(trades_file), 'equity_chart.png')
@@ -99,6 +126,6 @@ def generate_summary_report(trades_file):
 
 # 使用示例
 if __name__ == "__main__":
-    input_file = "C:/Users/mazhao/Desktop/MAutoTrader/回测报告/SOL_trades_20250602_225607.xlsx"
+    input_file = "C:/Users/mazhao/Desktop/MAutoTrader/回测报告/SOL_trades_20250615_232851.xlsx"
     output_file = generate_summary_report(input_file)
     print(f"报告生成完成：{output_file}")

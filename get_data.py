@@ -109,7 +109,7 @@ def main():
     end_date = datetime.now().strftime('%Y-%m-%d')
     
     # 创建主目录
-    base_dir = '回测结果测试集'
+    base_dir = 'SOL回测结果训练集'
     os.makedirs(base_dir, exist_ok=True)
     
     # 获取所有USDT永续合约

@@ -33,13 +33,19 @@ def check_position():
         return False
 
 def close_existing_position(symbol):
-    """ 平掉当前持仓 """
+    """ 平掉当前持仓并取消关联订单 """
     try:
+        # 先取消所有订单
+        cancel_all_orders(symbol)  # 新增：取消所有未完成订单
+        
+        # 获取当前持仓
         positions = client.futures_position_information()
         for position in positions:
             if position['symbol'] == symbol and float(position['positionAmt']) != 0:
                 side = 'SELL' if float(position['positionAmt']) > 0 else 'BUY'
                 quantity = abs(float(position['positionAmt']))
+                
+                # 市价平仓
                 client.futures_create_order(
                     symbol=symbol,
                     side=side,
@@ -47,8 +53,14 @@ def close_existing_position(symbol):
                     quantity=quantity
                 )
                 print(f"已平仓: {quantity} {symbol}")
+                
+                # 再次取消订单确保没有残留订单（新增）
+                cancel_all_orders(symbol)
+                return True
+        return False
     except Exception as e:
         logging.error(f"平仓失败: {e}")
+        return False
 
 def check_balance():
     """ 查询合约钱包余额 """

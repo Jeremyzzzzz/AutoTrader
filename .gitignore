@@ -1,0 +1,36 @@
+# Python开发环境
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*.pyc
+# IDE配置
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# 日志文件
+*.log
+logs/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 本地环境文件
+.env
+.env.local
+venv/
+
+# 回测生成文件（根据实际需要调整）
+回测数据训练集/
+回测数据测试集/
+回测报告/
+
+# 大文件过滤（Excel文件）
+*.xlsx

@@ -1,0 +1,7 @@
+{
+    "upper_shadow_ratio": 3,
+    "lower_shadow_ratio": 0.3,
+    "entry_multiplier": 0.5,
+    "tp_multiplier": 0.5,
+    "sl_multiplier": 1.5
+}

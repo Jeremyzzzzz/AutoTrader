@@ -1,0 +1,12 @@
+{
+    "model_train": {
+        "symbols": ["SOL_USDT_USDT"],
+        "timeframe": "1h",
+        "data_path": "回测数据训练集",
+        "epochs": 150,
+        "batch_size": 64,
+        "seq_length": 30,
+        "atr_period": 14,
+        "rsi_period": 14
+    }
+}

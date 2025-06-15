@@ -14,7 +14,13 @@ class BaseStrategy(ABC):
         self.timeframe = config['timeframe']
         self.params = config.get('params', {})
         self.data = pd.DataFrame()
-        self.signals = pd.DataFrame(columns=['timestamp', 'signal', 'price'])
+        self.signals = pd.DataFrame(columns=[
+            'timestamp', 
+            'signal', 
+            'price',
+            'take_profit',  # 新增字段
+            'stop_loss'     # 新增字段
+        ])
         
     @abstractmethod
     def calculate_signals(self):
