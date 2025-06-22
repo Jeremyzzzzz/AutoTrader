@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import datetime
 import os
 class NNStrategy(BaseStrategy):
-    def __init__(self, config):
+    def __init__(self, config, data_adapter):
         super().__init__(config)
         self.signals = pd.DataFrame(columns=[
             'timestamp', 
@@ -31,11 +31,12 @@ class NNStrategy(BaseStrategy):
         self.take_profit_pct = 0.02   # 2% 止盈
         
         # 初始化数据适配器
-        self.data_adapter = DataAdapter(
-            source='local',
-            path=config.get('data_path', '回测数据训练集'),
-            mode=config.get('mode', 'backtest')
-        )
+        self.data_adapter = data_adapter
+        # self.data_adapter = DataAdapter(
+        #     source=config.get('data_source', 'local'),  # 从配置获取数据源
+        #     path=config.get('data_path', '回测数据训练集'),
+        #     mode=config.get('mode', 'backtest')          # 从配置获取运行模式
+        # )
     def _prepare_features(self, data):
         processed_df = prepare_features(data)
         feature_columns = get_feature_columns()  # 使用统一获取特征列的方法
@@ -132,48 +133,43 @@ class NNStrategy(BaseStrategy):
         print(f"[NNStrategy] 收到新K线数据，时间: {data.index[-1]}")
 
         try:
-            # 动态计算时间范围（获取过去30天数据）
-            end_date = data.index[-1].to_pydatetime()
-            start_date = end_date - datetime.timedelta(days=30)
-            
-            # 添加实时数据缓存（修复初始化问题）
-            if not hasattr(self, 'cached_data') or self.cached_data.empty:
-                hist_data = self.data_adapter.load_data(
-                    symbol=self.symbol,
-                    timeframe=self.timeframe,
-                    start=start_date,
-                    end=end_date
-                )
-                if hist_data.empty:
-                    print("[NNStrategy] 警告：初始化数据加载失败")
-                    return 'HOLD', 0, (None, None)
-                self.cached_data = hist_data
-            else:
-                new_data = data.iloc[[-1]].copy()
-                new_time = new_data.index[0]
-                
-                if new_time > self.cached_data.index[-1]:
-                    self.cached_data = pd.concat([
-                        self.cached_data,
-                        new_data
-                    ]).sort_index()
+            # 确保数据格式统一（新增数据校验）
+            required_columns = ['open', 'high', 'low', 'close', 'volume']
+            if not all(col in data.columns for col in required_columns):
+                raise ValueError("数据格式异常，缺少必要字段")
 
-            # 使用缓存数据继续后续处理
-            hist_data = self.cached_data[-self.seq_length*3:]
+            # 统一时间索引处理（修复时间格式问题）
+            if not isinstance(data.index, pd.DatetimeIndex):
+                data = data.reset_index().rename(columns={'datetime': 'timestamp'})
+                data['timestamp'] = pd.to_datetime(data['timestamp'])
+                data = data.set_index('timestamp')
+
+            # 简化数据缓存逻辑（移除外部数据加载）
+            if not hasattr(self, 'cached_data') or self.cached_data.empty:
+                self.cached_data = data
+            else:
+                # 仅当收到新数据时追加（修复时间比较逻辑）
+                last_cached_time = self.cached_data.index[-1]
+                if data.index[-1] > last_cached_time:
+                    self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
             
-            if len(hist_data) < self.seq_length:
-                print(f"[NNStrategy] 数据不足，需要{self.seq_length}条，当前{len(hist_data)}条")
+            # 保留最近3倍序列长度的数据（原逻辑保留）
+            self.cached_data = self.cached_data[-self.seq_length*3:]
+            
+            # 数据长度检查（原逻辑保留）
+            if len(self.cached_data) < self.seq_length:
+                print(f"[NNStrategy] 数据不足，需要{self.seq_length}条，当前{len(self.cached_data)}条")
                 return 'HOLD', 0, (None, None)
 
             # 准备特征数据
-            features = self._prepare_features(hist_data)
+            features = self._prepare_features(self.cached_data)
             
             # === 修改为直接使用 is_filter_data 函数 ===
             # 获取最新K线的原始数据
-            last_open = hist_data['open'].iloc[-1]
-            last_high = hist_data['high'].iloc[-1]
-            last_low = hist_data['low'].iloc[-1]
-            last_close = hist_data['close'].iloc[-1]
+            last_open = self.cached_data['open'].iloc[-1]
+            last_high = self.cached_data['high'].iloc[-1]
+            last_low = self.cached_data['low'].iloc[-1]
+            last_close = self.cached_data['close'].iloc[-1]
             
             # 直接调用过滤函数进行判断
             if not is_filter_data(last_high, last_low, last_close, last_open):
@@ -197,7 +193,7 @@ class NNStrategy(BaseStrategy):
             # 获取预测信号 (取概率最高的类别)
             signal_idx = 0
             for idx in signal_probs:
-                if idx > 0.95:
+                if idx > 0.99:
                     print(f"signal_probs is ===>{signal_probs}")
                     signal_idx = np.argmax(signal_probs)
             print(f"[DEBUG] 预测信号索引: {signal_idx}")

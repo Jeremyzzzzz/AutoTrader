@@ -28,6 +28,7 @@ class DataAdapter:
         :param end: 结束时间 (datetime)
         :return: DataFrame with OHLCV data
         """
+        print(f"self.source is ===>{self.source}")
         if self.source == self.SOURCE_LOCAL:
             return self._load_from_local(symbol, timeframe, start, end)
         elif self.source == self.SOURCE_BINANCE:

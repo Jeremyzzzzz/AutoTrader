@@ -105,7 +105,7 @@ def main():
     exchange.load_markets()
                                 
     # 配置参数
-    start_date = '2025-03-01'
+    start_date = '2018-03-01'
     end_date = datetime.now().strftime('%Y-%m-%d')
     
     # 创建主目录
@@ -124,6 +124,8 @@ def main():
     # 遍历所有永续合约
     for market in perpetual_markets:
         symbol_ccxt = market['symbol']
+        if symbol_ccxt not in ["SOL/USDT:USDT"]:
+            continue
         exchange_symbol = market['id']
         # 清理非法字符并标准化文件名
         symbol_folder = sanitize_filename(symbol_ccxt.replace('/', '_'))
@@ -136,7 +138,7 @@ def main():
         
         try:
             # 定义需要获取的时间框架
-            timeframes = ['1h', '4h', '30m', '15m']
+            timeframes = ['1h', '4h', '30m', '15m', '5m']
             
             # 获取K线数据
             for tf in timeframes:

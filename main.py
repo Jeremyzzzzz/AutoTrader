@@ -56,9 +56,9 @@ def main():
         }
     }
     
-    # 创建策略实例
-    strategy = NNStrategy(strategy_config)
-    
+
+    if args.mode == 'live':
+        args.data_source = 'binance'  # 实时数据来源
     # 创建数据适配器
     data_adapter = DataAdapter(
         source=args.data_source,
@@ -67,7 +67,14 @@ def main():
         api_secret=args.api_secret,
         mode=args.mode
     )
-    
+        # 创建策略实例
+    strategy = NNStrategy({
+        'symbol': args.symbol,
+        'timeframe': args.timeframe,
+        'data_source': args.data_source,  # 新增data_source参数
+        'data_path': args.data_path,
+        'mode': args.mode  # 明确传递运行模式
+    }, data_adapter)
     # 创建交易引擎
     engine = TradingEngine(
         strategy=strategy,
@@ -79,7 +86,7 @@ def main():
     if args.mode == 'backtest':
         # 回测配置
         end_date = datetime.now()
-        start_date = '2024-01-01'
+        start_date = '2025-03-01'
         
         print(f"Starting backtest for {args.symbol} from {start_date} to {end_date}")
         

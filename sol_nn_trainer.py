@@ -11,7 +11,11 @@ import datetime
 import pandas as pd
 import json
 import os
-
+from sklearn.ensemble import RandomForestClassifier
+import matplotlib.pyplot as plt
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+from pandas.api.types import is_numeric_dtype
 # 自定义数据集类
 class SOLDataset(Dataset):
     def __init__(self, features, labels):
@@ -29,7 +33,7 @@ class EnhancedSOLModel(nn.Module):
     def __init__(self, input_size):
         super(EnhancedSOLModel, self).__init__()
         self.lstm = nn.LSTM(input_size, 128, batch_first=True, bidirectional=True)
-        self.attention = nn.MultiheadAttention(embed_dim=256, num_heads=4)
+        self.attention = nn.MultiheadAttention(embed_dim=256, num_heads=4, dropout=0.2)
         
         # 多任务输出层
         self.signal_head = nn.Sequential(
@@ -68,18 +72,50 @@ class SOLTrainer:
         self.seq_length = config.get('seq_length', 24)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    def _calculate_metrics(self, returns):
-        """计算风险管理指标"""
-        cumulative_returns = np.cumprod(1 + returns)
+    def _calculate_metrics(self, returns, processed_df):
+        """计算风险管理指标（修复版）"""
+        # 处理无效值
+        returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # 夏普率（假设无风险利率为0）
-        sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252)
+        # 修复累计收益计算
+        clipped_returns = np.clip(returns, -0.99, np.inf)  # 限制收益率范围
+        cumulative_returns = np.exp(np.log1p(clipped_returns).cumsum()) - 1
         
-        # 最大回撤
+        # 夏普比率计算增加容错
+        if len(returns) < 2 or np.std(returns) == 0:
+            sharpe_ratio = 0.0
+        else:
+            sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252)
+        
+        # 最大回撤计算优化
         peak = np.maximum.accumulate(cumulative_returns)
-        drawdown = (peak - cumulative_returns) / peak
-        max_drawdown = np.max(drawdown)
+        drawdown = np.zeros_like(peak)
+        valid_mask = (peak != 0)
+        drawdown[valid_mask] = (peak[valid_mask] - cumulative_returns[valid_mask]) / peak[valid_mask]
+        max_drawdown = np.nanmax(drawdown) if np.any(valid_mask) else 0.0
+
+        # 修复特征有效性计算
+        feature_effectiveness = {}
         
+        # 收益率相关性计算
+        valid_columns = [col for col in processed_df.columns if is_numeric_dtype(processed_df[col])]
+        corr_values = processed_df[valid_columns].corrwith(pd.Series(returns, index=processed_df.index[:len(returns)]))
+        feature_effectiveness['return_correlation'] = corr_values.to_dict()
+        
+        # 分组计算改为显式数值处理
+        signal_groups = processed_df.groupby('signal')
+        for col in valid_columns:
+            if col not in ['signal', 'filter_data']:
+                group_stats = signal_groups[col].agg(['mean', 'std'])
+                # 转换为标量值
+                feature_effectiveness[f'{col}_signal_entropy'] = {
+                    k: v.item() if hasattr(v, 'item') else v 
+                    for k, v in group_stats.to_dict().items()
+                }
+        
+        # 保存为结构化数据
+        pd.DataFrame.from_dict(feature_effectiveness, orient='index').to_csv('feature_effectiveness.csv')
+
         return sharpe_ratio, max_drawdown
 
     def create_sequences(self, data, labels):
@@ -103,14 +139,11 @@ class SOLTrainer:
         raw_data = self.data_adapter.load_data(
             symbol=symbol,
             timeframe=self.timeframe,
-            start=datetime.datetime(2023, 1, 1),
-            end=datetime.datetime.now()
+            start=datetime.datetime(2020, 1, 1),
+            end=datetime.datetime(2025, 3, 1)
         )
         # 使用统一特征工程（先生成原始特征）
         processed_df = prepare_features(raw_data)
-        
-        # 使用统一特征工程
-        processed_df = processed_df[processed_df['filter_data']]  # 仅保留有效样本
         
         # 定义特征列（必须与feature_utils完全一致）
         feature_columns = get_feature_columns()  # 使用统一接口
@@ -142,15 +175,33 @@ class SOLTrainer:
         # 多任务损失函数
         signal_criterion = nn.CrossEntropyLoss()
         price_criterion = nn.HuberLoss()
-
+    
+        # === 新增特征重要性分析 ===
+        # # 使用随机森林进行初步特征筛选
+        # rf = RandomForestClassifier(n_estimators=100)
+        # rf.fit(features, processed_df['signal'])
+        
+        # # 可视化特征重要性
+        # importances = rf.feature_importances_
+        # indices = np.argsort(importances)[::-1]
+        
+        # plt.figure(figsize=(12, 8))
+        # plt.title("Feature Importances")
+        # plt.bar(range(len(indices)), importances[indices], align='center')
+        # plt.xticks(range(len(indices)), np.array(feature_columns)[indices], rotation=90)
+        # plt.tight_layout()
+        # plt.savefig('feature_importance.png')
+        # plt.close()
+    
         # 训练循环
         current_sharpe = 0.0
         current_dd = 1.0
         max_sharpe = -1000
         min_max_dd = 2000
+
         for epoch in range(epochs):
             model.train()
-            total_loss = 0
+            total_loss, total_signal_loss, total_price_loss = 0, 0, 0
             for inputs, targets in tqdm(train_loader, desc=f'Epoch {epoch+1}'):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
@@ -163,8 +214,61 @@ class SOLTrainer:
                 loss = signal_loss + price_loss
                 
                 loss.backward()
+                
+                # 添加梯度监控
+                grad_norms = [p.grad.data.norm(2).item() for p in model.parameters() if p.grad is not None]
+                avg_grad_norm = np.mean(grad_norms) if grad_norms else 0
+                
                 optimizer.step()
                 total_loss += loss.item()
+                total_signal_loss += signal_loss.item()
+                total_price_loss += price_loss.item()
+
+            # 训练集统计
+            avg_loss = total_loss / len(train_loader)
+            avg_signal_loss = total_signal_loss / len(train_loader)
+            avg_price_loss = total_price_loss / len(train_loader)
+            
+            print(f"\n[训练统计] Epoch {epoch+1}")
+            print(f"总损失: {avg_loss:.4f} | 信号损失: {avg_signal_loss:.4f} | 价格损失: {avg_price_loss:.4f}")
+            print(f"平均梯度范数: {avg_grad_norm:.4f}")
+
+            # 验证集评估
+            model.eval()
+            with torch.no_grad():
+                val_returns = []
+                signal_dist = {0:0, 1:0, 2:0}  # 信号分布统计
+                for inputs, targets in val_loader:
+                    inputs, targets = inputs.to(self.device), targets.to(self.device)
+                    outputs = model(inputs)
+                    
+                    # 收集预测信号分布
+                    signals = torch.argmax(outputs[:, :3], dim=1)
+                    for s in signals.cpu().numpy():
+                        signal_dist[s] += 1
+                    
+                    # 收集预测收益率（调整为实际模拟收益）
+                    entry_prices = inputs[:, -1, 3]  # 使用收盘价作为入场价
+                    # 应改为基于实际信号方向计算
+                    signals = torch.argmax(outputs[:, :3], dim=1)
+                    long_mask = (signals == 1)
+                    short_mask = (signals == 2)
+
+                    # 做多收益计算
+                    long_returns = (outputs[long_mask, 3] - entry_prices[long_mask]) / entry_prices[long_mask]
+                    # 做空收益计算
+                    short_returns = (entry_prices[short_mask] - outputs[short_mask, 4]) / entry_prices[short_mask]
+
+                    val_returns = torch.cat([long_returns, short_returns]).cpu().numpy()
+                
+                # 计算验证集统计
+                val_returns = np.array(val_returns)
+                mean_return = np.mean(val_returns)
+                std_return = np.std(val_returns)
+                
+                print("\n[验证统计]")
+                print(f"信号分布 - 空仓: {signal_dist[0]} | 做多: {signal_dist[1]} | 做空: {signal_dist[2]}")
+                print(f"平均收益率: {mean_return:.4%} | 收益波动率: {std_return:.4%}")
 
             # 验证集评估
             model.eval()
@@ -179,7 +283,7 @@ class SOLTrainer:
                 
             # 计算风险管理指标
             val_returns = np.array(val_returns)
-            current_sharpe, current_dd = self._calculate_metrics(val_returns)
+            current_sharpe, current_dd = self._calculate_metrics(val_returns, processed_df)
             print(f"current_sharpe: {current_sharpe}, current_dd: {current_dd}")
             if current_sharpe > max_sharpe:
                 max_sharpe = current_sharpe

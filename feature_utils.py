@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
-
+import matplotlib.pyplot as plt
+import seaborn as sns
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 def calculate_rsi(series, period=14):
         """手动计算RSI指标"""
         delta = series.diff()
@@ -88,11 +91,9 @@ def get_feature_columns():
     """统一管理所有特征列（与训练代码完全一致）"""
     return [
         'open', 'high', 'low', 'close', 'volume',
-        'returns', 'log_ret',
-        'ma6', 'ma24', 'ma72', 'ma_diff_short', 'ma_diff_long',
-        'atr', 'volatility',
-        'rsi', 'macd', 'macd_signal',
-        'volume_ma', 'volume_ratio', 'obv','signal','stop_loss', 'take_profit','filter_data'
+        'ma6', 'ma24', 'ma72', 'rsi_ma6', 'atr_macd',
+        'atr',
+        'rsi', 'macd', 'macd_signal', 'volume_ratio','signal', 'stop_loss', 'take_profit','filter_data'
     ]
 
 def is_filter_data(high, low, close, open):
@@ -117,43 +118,40 @@ def prepare_features(data):
     df.index = pd.to_datetime(df.index)
     
     # === 新增模式过滤器 ===
-    
     # 标记所有出现条件的时点
     df['filter_data'] = is_filter_data(df['high'], df['low'], df['close'], df['open'])
 
-    # 价格特征
-    df['returns'] = df['close'].pct_change()
-    df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
-      # 修改移动平均计算方式（移除shift）
-    df['ma6'] = df['close'].rolling(6, min_periods=1).mean()  # 添加min_periods
-    df['ma24'] = df['close'].rolling(24, min_periods=1).mean()
-    df['ma72'] = df['close'].rolling(72, min_periods=1).mean()
-    df['ma_diff_short'] = df['ma6'] - df['ma24']
-    df['ma_diff_long'] = df['ma24'] - df['ma72']
+    # 修正移动平均计算（增加滞后处理）
+    df['ma6'] = df['close'].shift(1).rolling(6, min_periods=1).mean()
+    df['ma24'] = df['close'].shift(1).rolling(24, min_periods=1).mean()
+    df['ma72'] = df['close'].shift(1).rolling(72, min_periods=1).mean()
     
+    
+    
+
+
     # 波动率特征
     df['atr'] = calculate_atr(df, 14)
     # 修改波动率计算
-    df['volatility'] = df['close'].rolling(24, min_periods=1).std()
     
     # 动量指标
     df['rsi'] = calculate_rsi(df['close'], 14)
     macd, macd_signal = calculate_macd(df['close'])  # 直接调用统一函数
     df['macd'] = macd
     df['macd_signal'] = macd_signal
-    
-    # 成交量特征
-    # 修改成交量特征计算
-    df['volume_ma'] = df['volume'].rolling(6, min_periods=1).mean()
-    df['volume_ratio'] = df['volume'] / df['volume_ma'].replace(0, 1e-6)  # 防止除零
-    
-    df['obv'] = (np.sign(df['close'].diff().fillna(0)) * df['volume']).cumsum()
+        # 增加特征交叉
+    df['rsi_ma6'] = df['rsi'] * df['ma6']
+    df['atr_macd'] = df['atr'] * df['macd']
+    # 改进成交量特征（增加对数变换）
+    df['volume_ratio'] = np.log(df['volume'] / df['volume'].rolling(6).mean() + 1e-6)
     
         # === 新增标签生成 ===
-    future_window = 6  # 预测未来6小时
-    threshold = 0.01  # 1%阈值
-    atr_multiplier = 1.5
+    future_window = 4
+    atr_multiplier = 1
+    # 建议调整为动态阈值
+    threshold = df['atr'] / df['close'] * 1.5
+
     
     # 价格目标
     df['future_price'] = df['close'].shift(-future_window)
@@ -163,13 +161,14 @@ def prepare_features(data):
     df.loc[df['future_price'] > df['close'] * (1 + threshold), 'signal'] = 1
     df.loc[df['future_price'] < df['close'] * (1 - threshold), 'signal'] = 2
     
+    
     # 止损止盈目标 (基于波动率)
-    df['stop_loss'] = df['atr'] * atr_multiplier / df['close']  # 止损比例
-    df['take_profit'] = df['atr'] * 3.0 / df['close']           # 止盈比例
+    df['stop_loss'] = df['atr'].rolling(future_window).mean() * 1 / df['close']  # 使用未来窗口计算波动率
+    df['take_profit'] = df['atr'].rolling(future_window).mean() * 1.5 / df['close']
 
     # 创建有效训练窗口（出现信号前72小时 + 后24小时）
     window_before = 48  # 前导观察窗口
-    window_after = 24   # 后续跟踪窗口
+    window_after = 16   # 后续跟踪窗口
     df['valid_mask'] = False
     
     # 标记所有需要保留的样本
@@ -178,5 +177,14 @@ def prepare_features(data):
         end = idx + pd.Timedelta(hours=window_after)
         df.loc[start:end, 'valid_mask'] = True
     
+    # # 计算特征相关性
+    # corr_matrix = df[get_feature_columns()].corr()
+    
+    # # 可视化保存
+    # plt.figure(figsize=(20, 16))
+    # sns.heatmap(corr_matrix, annot=False, cmap='coolwarm', center=0)
+    # plt.title('Feature Correlation Matrix')
+    # plt.savefig('feature_correlation.png')
+    # plt.close()
     # 最终返回时保留有效样本
     return df[df['valid_mask']][get_feature_columns()].dropna()

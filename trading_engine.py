@@ -11,7 +11,7 @@ from datetime import datetime  # 添加这行
 import asyncio
 from threading import Event  # 新增事件控制
 from datetime import timedelta
-
+from report_generate import generate_summary_report
 def calculate_shadow_indicators(df):
     """计算影线相关指标"""
     df['body_size'] = (df['close'] - df['open']).abs()
@@ -141,7 +141,7 @@ class TradingEngine:
                 print(f"symbol is ===>{symbol}")
                 # 计算时间范围（获取最近3天数据）
                 end_dt = datetime.now()
-                start_dt = end_dt - timedelta(days=3)
+                start_dt = end_dt - timedelta(days=31)
                 end_ts = int(end_dt.timestamp() * 1000)
                 start_ts = int(start_dt.timestamp() * 1000)
                 
@@ -176,23 +176,31 @@ class TradingEngine:
                     self._execute_real_trade(signal)
                 print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 # 间隔与策略周期一致（例如1小时策略间隔3600秒）
-                self.stop_event.wait(5)
+                self.stop_event.wait(60)
 
             except Exception as e:
                 self.logger.error(f"数据获取异常: {str(e)}")
                 time.sleep(60)
     
     def _process_klines(self, klines):
-        """处理币安K线数据为DataFrame"""
-        columns = ['timestamp','open','high','low','close','volume',
-                 'close_time','quote_volume','trades',
-                 'taker_buy_base','taker_buy_quote','ignore']
+        """处理币安K线数据为DataFrame（修复列名和格式）"""
+        df = pd.DataFrame(klines, columns=[
+            'datetime', 'open', 'high', 'low', 'close', 'volume',  # 修改列名匹配回测数据
+            'close_time', 'quote_volume', 'trades',
+            'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
         
-        df = pd.DataFrame(klines, columns=columns)
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        numeric_cols = ['open','high','low','close','volume']
+        # 统一时间格式为datetime类型
+        df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
+        df.set_index('datetime', inplace=True)
+        
+        # 确保数值类型一致
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         df[numeric_cols] = df[numeric_cols].astype(float)
+        
+        # 添加与回测数据相同的timestamp列（毫秒时间戳）
+        df['timestamp'] = (df.index.astype('int64') // 10**6).astype(int)
+        
         return df
 
     def stop(self):
@@ -212,21 +220,38 @@ class TradingEngine:
         signal_type = signal_info.get('signal', 'HOLD')
         # print(f"current_timestamp is ==>{current_timestamp},  signal_info['signal'] is ==>{signal_info['signal']}, price is =>{price}, take_profit is =>{take_profit}, stop_loss is =>{stop_loss}, signal_type is =>{signal_type}")
         current_price = self.strategy.data['close'].iloc[-1]
+
         # 检查持仓的止盈止损
         if self.position != 0:
             if self.position > 0:  # 多仓
-                if current_price >= self.take_profit or (signal_info['signal'] == '做空' and self.entry_price < current_price):
+                if current_price >= self.take_profit:
+                    self._close_position('做多止盈', self.take_profit, current_time)
+                elif (signal_info['signal'] == '做空' and self.entry_price < current_price):
                     self._close_position('做多止盈', current_price, current_time)
-                elif current_price <= self.stop_loss or (signal_info['signal'] == '做空' and self.entry_price >= current_price):
+                elif current_price <= self.stop_loss:
+                    self._close_position('做多止损', self.stop_loss, current_time)
+                elif (signal_info['signal'] == '做空' and self.entry_price >= current_price):
                     self._close_position('做多止损', current_price, current_time)
             elif self.position < 0:  # 空仓
-                if current_price <= self.take_profit or (signal_info['signal'] == '做多' and self.entry_price < current_price):
+                if current_price <= self.take_profit:
+                    self._close_position('做空止盈', self.take_profit, current_time)
+                elif (signal_info['signal'] == '做多' and self.entry_price > current_price):
                     self._close_position('做空止盈', current_price, current_time)
-                elif current_price >= self.stop_loss or (signal_info['signal'] == '做多' and self.entry_price >= current_price):
+                elif current_price >= self.stop_loss:
+                    self._close_position('做空止损', self.stop_loss, current_time)
+                elif (signal_info['signal'] == '做多' and self.entry_price <= current_price):
                     self._close_position('做空止损', current_price, current_time)
 
-        # 处理新信号
-        if signal_info['signal'] == '做多' and self.position == 0 and current_price <= price:
+        # # 处理新信号
+        #  # 新增持仓方向检查
+        # if self.position != 0:
+        #     current_side = 'LONG' if self.position > 0 else 'SHORT'
+        #     signal_side = 'LONG' if signal_info['signal'] == '做多' else 'SHORT'
+            
+        #     if current_side == signal_side:
+        #         self.logger.info(f"已有{current_side}仓位，跳过{signal_side}开仓")
+        #         return
+        if signal_info['signal'] == '做多' and self.position <= 0 and current_price <= price:
             # 记录止损止盈价格（示例：3%止盈，2%止损）
             entry_price = current_price
             self.take_profit = take_profit
@@ -245,7 +270,7 @@ class TradingEngine:
                 stop_loss=self.stop_loss,
                 timestamp=current_time
             )
-        elif signal_info['signal'] == '做空' and self.position == 0 and current_price >= price:
+        elif signal_info['signal'] == '做空' and self.position >= 0 and current_price >= price:
             # 记录止损止盈价格
             entry_price = price
             self.take_profit = take_profit
@@ -349,7 +374,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (15) / price
+            quantity = (750) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()
@@ -371,8 +396,13 @@ class TradingEngine:
             take_profit = round(take_profit - (take_profit % tick_size), 8)
 
             # 确定交易方向
-            side = 'BUY' if signal_info['signal'] == '做多' else 'SELL'
-
+            if signal_info['signal'] == '做多':
+                side = 'BUY'
+            elif signal_info['signal'] == '做空':
+                side = 'SELL'
+            else:
+                print("HOLD 信号")
+                return
             # 调用trade_controller的place_order
             success = place_order(
                 symbol=symbol,
@@ -406,7 +436,7 @@ class TradingEngine:
         # 生成报告路径（使用回测结束时间）
         report_path = "C:/Users/mazhao/Desktop/MAutoTrader/回测报告"
         os.makedirs(report_path, exist_ok=True)
-        timestamp = self.backtest_end.strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         symbol = self.strategy.symbol.replace('/', '')
         trades_file = f"{report_path}/{symbol}_trades_{timestamp}.xlsx"
         print(f"数据已经保存到{symbol}_trades_{timestamp}.xlsx")
@@ -416,4 +446,5 @@ class TradingEngine:
             trades_df.to_excel(writer, sheet_name='交易明细', index=False)
 
         self.performance['report_file'] = trades_file
+        generate_summary_report(trades_file)
         return self.performance
