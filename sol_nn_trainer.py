@@ -293,7 +293,7 @@ class SOLTrainer:
             print(f'Epoch {epoch+1} | Train Loss: {total_loss/len(train_loader):.4f} | max_sharpe: {max_sharpe:.4f} | min_max_dd: {min_max_dd:.4f}'  )
 
         # 保存完整模型
-        model_dir = r'C:\Users\mazhao\Desktop\MAutoTrader\model'
+        model_dir = r'model'
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"{symbol}_nn_model.pth")
         

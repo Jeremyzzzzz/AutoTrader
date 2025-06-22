@@ -186,7 +186,7 @@ if __name__ == "__main__":
     optimizer = ParameterOptimizer(
         config_path='strategys/shadowConfig.json',
         data_source='local',  # 或 'binance'
-        data_path='C:/Users/mazhao/Desktop/MAutoTrader/回测数据训练集',
+        data_path='回测数据训练集',
         symbol='SOL_USDT_USDT',
         timeframe='1h',
         capital=10000

@@ -349,6 +349,19 @@ class TradingEngine:
             # 从策略中获取止损止盈参数
 
             # 获取账户余额
+            try:
+                positions = self.binance_client.futures_position_information()
+                symbol = self.strategy.symbol + "USDT"
+                position_amt = next(
+                    (float(p['positionAmt']) for p in positions if p['symbol'] == symbol), 
+                    0.0
+                )
+                # 更新本地持仓状态
+                self.position = position_amt
+                self.logger.info(f"持仓更新 | {symbol} 当前仓位: {position_amt}")
+            except Exception as e:
+                self.logger.error(f"持仓查询失败: {str(e)}")
+                return
             # 检查持仓方向与信号是否冲突
             if self.position != 0:
                 current_side = 'LONG' if self.position > 0 else 'SHORT'
@@ -434,7 +447,7 @@ class TradingEngine:
             return
 
         # 生成报告路径（使用回测结束时间）
-        report_path = "C:/Users/mazhao/Desktop/MAutoTrader/回测报告"
+        report_path = "回测报告"
         os.makedirs(report_path, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         symbol = self.strategy.symbol.replace('/', '')

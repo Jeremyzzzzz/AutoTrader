@@ -3,7 +3,7 @@
     "symbol": "SOL",
     "timeframe": "1h",
     "data_source": "local",
-    "data_path": "C:/Users/mazhao/Desktop/MAutoTrader/SOL回测结果训练集", 
+    "data_path": "SOL回测结果训练集", 
     "capital": 10000,
     "api_key": "QbqwCVv6p1cJEcvtAGhEfVPxaxR841JC7xyafG6kklLyCToIk05cYpVYz7zNcb9E",
     "api_secret": "YzawJZuHmKj383VTBsRP1QkU19H9CkWUPw8Tqzng8UaVP6A9CRiszFeTerPkIejT"

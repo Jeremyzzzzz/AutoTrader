@@ -20,7 +20,7 @@ def main():
     
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='Cryptocurrency Trading System')
-    config_path = r'C:\Users\mazhao\Desktop\MAutoTrader\config.json'
+    config_path = r'config.json'
     args, _ = parser.parse_known_args()
     
     # 加载配置文件
