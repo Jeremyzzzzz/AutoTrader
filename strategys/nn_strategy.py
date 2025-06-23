@@ -193,7 +193,7 @@ class NNStrategy(BaseStrategy):
             # 获取预测信号 (取概率最高的类别)
             signal_idx = 0
             for idx in signal_probs:
-                if idx > 0.99:
+                if idx > 0.995:
                     print(f"signal_probs is ===>{signal_probs}")
                     signal_idx = np.argmax(signal_probs)
             print(f"[DEBUG] 预测信号索引: {signal_idx}")

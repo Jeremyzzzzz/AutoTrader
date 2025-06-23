@@ -168,7 +168,7 @@ def prepare_features(data):
 
     # 创建有效训练窗口（出现信号前72小时 + 后24小时）
     window_before = 48  # 前导观察窗口
-    window_after = 16   # 后续跟踪窗口
+    window_after = 12   # 后续跟踪窗口
     df['valid_mask'] = False
     
     # 标记所有需要保留的样本
