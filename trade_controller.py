@@ -172,6 +172,14 @@ def adjust_price(price, tick_size):
 
     return round(price // tick_size * tick_size, precision)
 
+def has_pending_limit_orders(symbol):
+    """检查是否存在未成交的限价单"""
+    try:
+        orders = client.futures_get_open_orders(symbol=symbol)
+        return any(order['type'] == 'LIMIT' for order in orders)
+    except Exception as e:
+        logging.error(f"检查限价单失败: {e}")
+        return True  # 出现异常时默认存在挂单
 
 def place_order(symbol, side, quantity, price, stop_loss, take_profit):
     """
@@ -219,25 +227,29 @@ def place_order(symbol, side, quantity, price, stop_loss, take_profit):
         )
         print(f"限价下单成功: {order}")
 
-        # 2. 止盈单
+        # 2. 止盈单（改为限价单）
         take_profit_order = client.futures_create_order(
             symbol=symbol,
             side='SELL' if side == 'BUY' else 'BUY',
-            type='TAKE_PROFIT_MARKET',
-            stopPrice=str(take_profit),  # 触发止盈价格
-            closePosition=True  # 全部平仓
+            type='TAKE_PROFIT',  # 修改为限价止盈单
+            timeInForce='GTC',
+            stopPrice=str(take_profit),
+            price=str(take_profit),  # 新增限价价格
+            quantity=quantity,
         )
-        print(f"止盈单设置成功: {take_profit_order}")
+        print(f"限价止盈单设置成功: {take_profit_order}")
 
         # 3. 止损单
         stop_loss_order = client.futures_create_order(
             symbol=symbol,
             side='SELL' if side == 'BUY' else 'BUY',
-            type='STOP_MARKET',
-            stopPrice=str(stop_loss),  # 触发止损价格
-            closePosition=True  # 全部平仓
+            type='STOP',
+            timeInForce='GTC',
+            stopPrice=str(stop_loss),
+            price=str(stop_loss),  # 确保传递price参数
+            quantity=quantity,
         )
-        print(f"止损单设置成功: {stop_loss_order}")
+        print(f"限价止损单设置成功: {stop_loss_order}")
 
         print(f"限价单价格: {price}, 止盈价格: {take_profit}, 止损价格: {stop_loss}")
         return True

@@ -1,5 +1,5 @@
 {
-    "mode": "backtest",
+    "mode": "live",
     "symbol": "SOL",
     "timeframe": "1h",
     "data_source": "local",

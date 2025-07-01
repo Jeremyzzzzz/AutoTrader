@@ -32,11 +32,50 @@ class NNStrategy(BaseStrategy):
         
         # 初始化数据适配器
         self.data_adapter = data_adapter
-        # self.data_adapter = DataAdapter(
-        #     source=config.get('data_source', 'local'),  # 从配置获取数据源
-        #     path=config.get('data_path', '回测数据训练集'),
-        #     mode=config.get('mode', 'backtest')          # 从配置获取运行模式
-        # )
+        # 初始化日志路径
+        self.log_dir = "logs"
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.log_file = os.path.join(self.log_dir, f"nn_signals_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx")
+
+    def _log_signal(self, signal_probs, kline_data):
+        """记录信号日志"""
+        # 获取K线时间戳（使用结束时间）
+        timestamp = kline_data.name.strftime('%Y-%m-%d %H:%M:%S')
+        
+        log_entry = {
+        'timestamp': timestamp,
+        'open': kline_data['open'],
+        'high': kline_data['high'],
+        'low': kline_data['low'],
+        'close': kline_data['close'],
+        'volume': kline_data['volume'],
+        'prob_hold': signal_probs[0],
+        'prob_long': signal_probs[1], 
+        'prob_short': signal_probs[2]
+        }
+    
+        # 新增写入逻辑
+        df = pd.DataFrame([log_entry])
+        
+        # 如果文件不存在，创建新文件并写入header
+        if not os.path.exists(self.log_file):
+            df.to_excel(self.log_file, index=False, engine='openpyxl')
+        else:
+            # 追加模式写入（保留历史记录）
+            with pd.ExcelWriter(
+                self.log_file,
+                engine='openpyxl',
+                mode='a',
+                if_sheet_exists='overlay'
+            ) as writer:
+                # 找到最后一行并追加数据
+                df.to_excel(
+                    writer, 
+                    index=False,
+                    header=False,
+                    startrow=writer.sheets['Sheet1'].max_row
+                )
+
     def _prepare_features(self, data):
         processed_df = prepare_features(data)
         feature_columns = get_feature_columns()  # 使用统一获取特征列的方法
@@ -98,13 +137,15 @@ class NNStrategy(BaseStrategy):
             return
         signal, quantity, params = result
         
-        take_profit, stop_loss = params if params else (None, None)
+        # 修改参数解包方式，添加持仓时间
+        take_profit, stop_loss, holding_time = (params + (100,))[:3]  # 默认持仓2小时
         new_signal = pd.DataFrame({
             'timestamp': [self.data.index[-1]],
             'signal': [signal],
             'price': [latest_data['close']],
             'take_profit': [take_profit],
-            'stop_loss': [stop_loss]
+            'stop_loss': [stop_loss],
+            'holding_time': [holding_time]  # 新增持仓时间字段
         })
 
         # 过滤空值列
@@ -189,11 +230,13 @@ class NNStrategy(BaseStrategy):
             print(f"[DEBUG] 信号概率（观望/做多/做空）: {signal_probs}")
             stop_loss = outputs[3]     # 止损比例
             take_profit = outputs[4]    # 止盈比例
-            
+            # 在计算signal_probs之后添加日志记录
+            # latest_kline = self.cached_data.iloc[-1]  # 获取最新完整K线
+            # self._log_signal(signal_probs, latest_kline)
             # 获取预测信号 (取概率最高的类别)
             signal_idx = 0
             for idx in signal_probs:
-                if idx > 0.995:
+                if idx > 0.99:
                     print(f"signal_probs is ===>{signal_probs}")
                     signal_idx = np.argmax(signal_probs)
             print(f"[DEBUG] 预测信号索引: {signal_idx}")
@@ -202,17 +245,19 @@ class NNStrategy(BaseStrategy):
             # 生成交易信号
             if signal_idx == 1:  # 做多
                 return '做多', 0.5, (
-                    entry_price * (1 + take_profit),
-                    entry_price * (1 - stop_loss)
+                    entry_price * (1 + take_profit * 1.7),
+                    entry_price * (1 - stop_loss * 1.7),
+                    100  # 添加持仓时间（小时）
                 )
             elif signal_idx == 2:  # 做空
                 return '做空', 0.5, (
-                    entry_price * (1 - take_profit),
-                    entry_price * (1 + stop_loss)
+                    entry_price * (1 - take_profit * 1.7),
+                    entry_price * (1 + stop_loss * 1.7),
+                    100  # 添加持仓时间（小时）
                 )
             else:  # 观望
-                return 'HOLD', 0, (0, 0)
+                return 'HOLD', 0, (0, 0, 100)
 
         except Exception as e:
             print(f"[NNStrategy] 处理K线时发生异常: {str(e)}")
-            return 'HOLD', 0, (None, None)
+            return 'HOLD', 0, (None, None, None)

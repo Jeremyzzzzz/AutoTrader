@@ -34,7 +34,7 @@ class TradingEngine:
     MODE_BACKTEST = 'backtest'
     MODE_LIVE = 'live'
     
-    def __init__(self, strategy, data_adapter, mode, capital=10000, trade_fee=0.001):
+    def __init__(self, strategy, data_adapter, mode, capital=10000, trade_fee=0.0002):
         """
         交易引擎初始化
         :param strategy: 交易策略实例
@@ -65,6 +65,8 @@ class TradingEngine:
         self.logger = logging.getLogger('TradingEngine')
         self.initial_capital = capital  # 新增初始化属性
         self.total_profit = 0.0  # 新增总利润跟踪
+        self.entry_time = None  # 新增入场时间跟踪
+        self.holding_hours = 100  # 新增持仓时长配置
     
     def run_backtest(self, start, end):
         """运行回测"""
@@ -87,7 +89,6 @@ class TradingEngine:
             current_data = data.iloc[:i+1]
             current_time = data.index[i]
             self.strategy.update_data(current_data)
-            
             # 获取最新信号
             signal = self.strategy.get_latest_signal()
             if not signal:
@@ -144,7 +145,11 @@ class TradingEngine:
                 start_dt = end_dt - timedelta(days=31)
                 end_ts = int(end_dt.timestamp() * 1000)
                 start_ts = int(start_dt.timestamp() * 1000)
-                
+                # 检查持仓时间
+                if self.position != 0:
+                    time_elapsed = datetime.now() - self.entry_time
+                    if time_elapsed.total_seconds() >= self.holding_hours * 3600:
+                        self._close_position('时间平仓', self.strategy.data['close'].iloc[-1], datetime.now())
                 # 分页获取K线数据（与winMoney.py保持一致）
                 klines = []
                 while True:
@@ -176,11 +181,11 @@ class TradingEngine:
                     self._execute_real_trade(signal)
                 print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 # 间隔与策略周期一致（例如1小时策略间隔3600秒）
-                self.stop_event.wait(60)
+                self.stop_event.wait(10)
 
             except Exception as e:
                 self.logger.error(f"数据获取异常: {str(e)}")
-                time.sleep(60)
+                time.sleep(10)
     
     def _process_klines(self, klines):
         """处理币安K线数据为DataFrame（修复列名和格式）"""
@@ -220,28 +225,41 @@ class TradingEngine:
         signal_type = signal_info.get('signal', 'HOLD')
         # print(f"current_timestamp is ==>{current_timestamp},  signal_info['signal'] is ==>{signal_info['signal']}, price is =>{price}, take_profit is =>{take_profit}, stop_loss is =>{stop_loss}, signal_type is =>{signal_type}")
         current_price = self.strategy.data['close'].iloc[-1]
+        current_high = self.strategy.data['high'].iloc[-1]
+        current_low = self.strategy.data['low'].iloc[-1]
+        # 初始化加仓计数器
+        if not hasattr(self, 'max_added'):
+            self.max_added = 0
 
+        # 计算价格接近止损的程度
+        # self.near_stop_loss = False
         # 检查持仓的止盈止损
         if self.position != 0:
             if self.position > 0:  # 多仓
-                if current_price >= self.take_profit:
+                if current_low <= self.stop_loss:
+                    self._close_position('做多止损', self.stop_loss, current_time)
+                    if self.max_added < 2:
+                        self.near_stop_loss = True
+                elif (signal_info['signal'] == '做空' and self.entry_price >= current_price):
+                    self._close_position('做多止损', current_price, current_time)
+                elif current_high >= self.take_profit:
                     self._close_position('做多止盈', self.take_profit, current_time)
                 elif (signal_info['signal'] == '做空' and self.entry_price < current_price):
                     self._close_position('做多止盈', current_price, current_time)
-                elif current_price <= self.stop_loss:
-                    self._close_position('做多止损', self.stop_loss, current_time)
-                elif (signal_info['signal'] == '做空' and self.entry_price >= current_price):
-                    self._close_position('做多止损', current_price, current_time)
             elif self.position < 0:  # 空仓
-                if current_price <= self.take_profit:
+                if current_high >= self.stop_loss:
+                    self._close_position('做空止损', self.stop_loss, current_time)
+                    if self.max_added < 2:
+                        self.near_stop_loss = True
+                elif (signal_info['signal'] == '做多' and self.entry_price <= current_price):
+                    self._close_position('做空止损', current_price, current_time)
+                elif current_low <= self.take_profit:
                     self._close_position('做空止盈', self.take_profit, current_time)
                 elif (signal_info['signal'] == '做多' and self.entry_price > current_price):
                     self._close_position('做空止盈', current_price, current_time)
-                elif current_price >= self.stop_loss:
-                    self._close_position('做空止损', self.stop_loss, current_time)
-                elif (signal_info['signal'] == '做多' and self.entry_price <= current_price):
-                    self._close_position('做空止损', current_price, current_time)
+ 
 
+        # 在现有止盈止损检查前添加方向冲突平仓逻辑
         # # 处理新信号
         #  # 新增持仓方向检查
         # if self.position != 0:
@@ -251,44 +269,87 @@ class TradingEngine:
         #     if current_side == signal_side:
         #         self.logger.info(f"已有{current_side}仓位，跳过{signal_side}开仓")
         #         return
-        if signal_info['signal'] == '做多' and self.position <= 0 and current_price <= price:
-            # 记录止损止盈价格（示例：3%止盈，2%止损）
-            entry_price = current_price
-            self.take_profit = take_profit
-            self.stop_loss = stop_loss
-            
-            # 开多仓逻辑
-            available_capital = 10000  # 使用动态资金
-            fee = available_capital * 0.0002
-            quantity = (available_capital - fee) / entry_price
-            
-            self._open_position(
-                trade_type='做多',
-                price=entry_price,
-                quantity=quantity,
-                take_profit=self.take_profit,
-                stop_loss=self.stop_loss,
-                timestamp=current_time
-            )
-        elif signal_info['signal'] == '做空' and self.position >= 0 and current_price >= price:
-            # 记录止损止盈价格
-            entry_price = price
-            self.take_profit = take_profit
-            self.stop_loss = stop_loss
-            
-            # 开空仓逻辑
-            available_capital = self.initial_capital * 1.0
-            fee = available_capital * 0.0002
-            quantity = (available_capital - fee) / entry_price
-            
-            self._open_position(
-                trade_type='做空',
-                price=current_price,
-                quantity=-quantity,
-                take_profit=self.take_profit,
-                stop_loss=self.stop_loss,
-                timestamp=current_time
-            )
+        # 新增持仓时间检查
+        if self.position != 0 and self.entry_time is not None:
+            hours_held = (current_time - self.entry_time).total_seconds() / 3600
+            if hours_held >= self.holding_hours:
+                if self.position > 0:
+                    self._close_position('做多超时平仓', current_price, current_time)
+                else:
+                    self._close_position('做空超时平仓', current_price, current_time)
+
+        if self.position != 0 and signal_info['signal'] == 'HOLD':
+            if self.position > 0:
+                self._close_position('做多信号改变平仓', current_price, current_time)
+            else:
+                self._close_position('做空信号改变平仓', current_price, current_time)
+    
+        self.near_stop_loss  = False
+        if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss)and current_price <= price:
+            if self.position < 0:  # 如果当前是空头仓位
+                self._close_position('做空持仓冲突平仓', current_price, current_time)
+            else:
+                self.holding_hours = signal_info.get('holding_time', 100)  # 从信号获取持仓时间
+                self.entry_time = current_time  # 记录入场时间
+                # 记录止损止盈价格（示例：3%止盈，2%止损）
+                entry_price = current_price
+                self.take_profit = take_profit
+                self.stop_loss = stop_loss
+                
+                # 开多仓逻辑
+                available_capital = 10000  # 使用动态资金
+                fee = available_capital * 0.0002
+                quantity = (available_capital - fee) / entry_price
+                if (self.near_stop_loss):
+                    self._open_position(
+                        trade_type='做多加仓',
+                        price=entry_price,
+                        quantity=quantity * 2,
+                        take_profit=self.take_profit,
+                        stop_loss=self.stop_loss,
+                        timestamp=current_time
+                    )
+                else:
+                    self._open_position(
+                        trade_type='做多',
+                        price=entry_price,
+                        quantity=quantity,
+                        take_profit=self.take_profit,
+                        stop_loss=self.stop_loss,
+                        timestamp=current_time
+                    )
+        elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss) and current_price >= price:
+            if self.position > 0:  # 如果当前是空头仓位
+                self._close_position('做多持仓冲突平仓', current_price, current_time)
+            else:
+                # 记录止损止盈价格
+                entry_price = price
+                self.take_profit = take_profit
+                self.stop_loss = stop_loss
+                self.holding_hours = signal_info.get('holding_time', 100)  # 从信号获取持仓时间
+                self.entry_time = current_time  # 记录入场时间
+                # 开空仓逻辑
+                available_capital = self.initial_capital * 1.0
+                fee = available_capital * 0.0002
+                quantity = (available_capital - fee) / entry_price
+                if (self.near_stop_loss):
+                    self._open_position(
+                        trade_type='做空加仓',
+                        price=current_price,
+                        quantity=-quantity * 2,
+                        take_profit=self.take_profit,
+                        stop_loss=self.stop_loss,
+                        timestamp=current_time
+                    )
+                else:
+                    self._open_position(
+                    trade_type='做空',
+                    price=current_price,
+                    quantity=-quantity,
+                    take_profit=self.take_profit,
+                    stop_loss=self.stop_loss,
+                    timestamp=current_time
+                )
 
     def _open_position(self, trade_type, price, quantity, take_profit, stop_loss, timestamp):
         """统一处理开仓逻辑"""
@@ -306,11 +367,12 @@ class TradingEngine:
             '止盈价': take_profit,
             '止损价': stop_loss,
             '收益': None,
-            '手续费': price * abs(quantity) * 0.0002
+            '手续费': price * abs(quantity) * 0.0002,
+            '持仓时间(小时)': self.holding_hours  # 新增持仓时间记录
         })
-        self.position = quantity
+        self.position = self.position + quantity
         self.entry_price = price
-
+        self.max_added = self.max_added + 1
     def _close_position(self, close_type, price, timestamp):
         """统一处理平仓逻辑"""
         print(f"\n=== 平仓操作 ===")
@@ -331,23 +393,40 @@ class TradingEngine:
                 else (self.entry_price - price) * close_quantity - fee,
             '手续费': fee
         })
-        
+        self.near_stop_loss = False
         self.position = 0
         self.capital += proceeds
         self.total_profit += self.trades[-1]['收益']
+        self.max_added = self.max_added - 1
 
     def _execute_real_trade(self, signal_info):
         """实盘交易执行（完整版）"""
         try:
-            from trade_controller import place_order,close_existing_position
-            price = signal_info['price']
+            from trade_controller import place_order,close_existing_position, has_pending_limit_orders
+            ticker = self.binance_client.futures_symbol_ticker(symbol=self.strategy.symbol + "USDT")
+            current_price = float(ticker['price'])
+            price = current_price
+            # 根据方向调整挂单价格
+            if signal_info['signal'] == '做多' and signal_info['price'] > current_price:
+                price = current_price * 0.999  # 当前价下方0.1%挂单
+            elif signal_info['signal'] == '做空' and signal_info['price'] < current_price:
+                price = current_price * 1.001  # 当前价上方0.1%挂单
+            else:
+                price = signal_info['price']
+
             take_profit = signal_info['take_profit']
             stop_loss = signal_info['stop_loss']
             signal_type = signal_info.get('signal_type', 'manual')  # 新增信号类型字段
             take_profit = signal_info['take_profit']
+            # 添加持仓时间记录
+            self.entry_time = datetime.now()  # 记录入场时间
+            self.holding_hours = signal_info.get('holding_time', 100)  # 默认2小时
             symbol = self.strategy.symbol + "USDT"
             # 从策略中获取止损止盈参数
 
+            # 添加交易开始日志
+            self.logger.info(f"开始处理交易信号 | 类型: {signal_info['signal']} | 价格: {price:.4f} | "
+                           f"止盈: {take_profit:.4f} | 止损: {stop_loss:.4f}")
             # 获取账户余额
             try:
                 positions = self.binance_client.futures_position_information()
@@ -364,12 +443,14 @@ class TradingEngine:
                 return
             # 检查持仓方向与信号是否冲突
             if self.position != 0:
-                current_side = 'LONG' if self.position > 0 else 'SHORT'
-                signal_side = 'SELL' if signal_info['signal'] == '做空' else 'BUY'
-                
+                current_side = 'NONE'
+                if self.position > 0:
+                    current_side = 'LONG'
+                if self.position < 0:
+                    current_side = 'SHORT'
                 # 方向冲突时先平仓
-                if (current_side == 'LONG' and signal_side == 'SELL') or \
-                   (current_side == 'SHORT' and signal_side == 'BUY'):
+                if (current_side == 'LONG' and signal_info['signal'] != '做多') or \
+                   (current_side == 'SHORT' and signal_info['signal'] != '做空'):
                     
                     # 平仓逻辑
                     close_success = close_existing_position(
@@ -387,7 +468,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (750) / price
+            quantity = (3000) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()
@@ -417,6 +498,9 @@ class TradingEngine:
                 print("HOLD 信号")
                 return
             # 调用trade_controller的place_order
+            if has_pending_limit_orders(symbol):
+                self.logger.warning(f"存在未成交限价单，跳过本次挂单 | {symbol}")
+                return
             success = place_order(
                 symbol=symbol,
                 side=side,
@@ -431,14 +515,22 @@ class TradingEngine:
                 # 更新本地持仓状态
                 self.position = quantity if side == 'BUY' else -quantity
                 self.entry_price = price
+                self.trades.append({
+                    'timestamp': datetime.now(),
+                    '类型': '实盘-' + signal_info['signal'],
+                    '价格': price,
+                    '数量': quantity,
+                    '止盈价': take_profit,
+                    '止损价': stop_loss,
+                    '信号来源': signal_type,
+                    '持仓时间配置': self.holding_hours
+                })
             else:
                 self.logger.warning("订单提交失败")
 
         except Exception as e:
             self.logger.error(f"交易执行失败：{str(e)}", exc_info=True)
             # 失败后取消所有未完成订单
-            from trade_controller import cancel_all_orders
-            cancel_all_orders(symbol)
     
     def _generate_report(self):
         """生成回测报告"""
