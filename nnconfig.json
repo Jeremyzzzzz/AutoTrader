@@ -5,7 +5,7 @@
         "data_path": "回测数据训练集",
         "epochs": 1500,
         "batch_size": 64,
-        "seq_length": 30,
+        "seq_length": 4,
         "atr_period": 14,
         "rsi_period": 14
     }

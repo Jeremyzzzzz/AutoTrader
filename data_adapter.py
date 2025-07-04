@@ -91,36 +91,36 @@ class DataAdapter:
         print(f"Data saved to {file_path}")
     
     def _load_from_binance(self, symbol, timeframe, start, end):
-        """从币安API加载数据"""
+        """从币安API加载合约数据"""
         if not self.binance_client:
             raise RuntimeError("Binance client not initialized")
         
-        # 币安API限制每次最多获取1000条K线
         data = pd.DataFrame()
         current_start = start
         
         while current_start < end:
             current_end = min(current_start + timedelta(days=30), end)
             
-            klines = self.binance_client.get_historical_klines(
+            # 修改为合约接口，添加futures_前缀
+            klines = self.binance_client.futures_klines(
                 symbol=symbol,
                 interval=timeframe,
-                start_str=current_start.strftime("%d %b %Y %H:%M:%S"),
-                end_str=current_end.strftime("%d %b %Y %H:%M:%S"),
-                limit=1000
+                startTime=int(current_start.timestamp() * 1000),  # 合约接口使用时间戳
+                endTime=int(current_end.timestamp() * 1000),
+                limit=500  # 合约接口单次最大500条
             )
             
             if not klines:
                 break
                 
-            # 转换为DataFrame
+            # 列名保持与现货接口一致    
             df = pd.DataFrame(klines, columns=[
                 'timestamp', 'open', 'high', 'low', 'close', 'volume',
                 'close_time', 'quote_asset_volume', 'trades',
                 'taker_buy_base', 'taker_buy_quote', 'ignore'
             ])
             
-            # 数据类型转换
+            # 后续处理保持不变...
             numeric_cols = ['open', 'high', 'low', 'close', 'volume']
             df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -129,7 +129,6 @@ class DataAdapter:
             data = pd.concat([data, df])
             current_start = current_end + timedelta(seconds=1)
             
-            # 遵守API速率限制
             time.sleep(0.1)
         
         return data

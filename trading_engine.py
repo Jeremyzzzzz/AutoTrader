@@ -96,18 +96,22 @@ class TradingEngine:
         self.trades = []
         
         for i in range(len(data)):
-            current_data = data.iloc[:i+1]
-            current_time = data.index[i]
+            # 修改为仅使用已闭合K线（排除最新未闭合K线）
+            current_data = data.iloc[:i]  # 从 [i+1] 改为 [i]
+            if len(current_data) == 0:
+                continue
+                
+            current_time = data.index[i-1]  # 使用前一闭合K线时间
             # 转换为北京时间 (UTC+8)
             current_time = current_time.tz_localize('UTC').tz_convert('Asia/Shanghai').tz_localize(None)
             self.strategy.update_data(current_data)
             signal = self.strategy.get_latest_signal()
-            
+            trade_time = current_time + pd.Timedelta(hours=1)  # 最后一根K线后1小时
             if signal:
-                self._execute_trade(signal, current_time)
+                self._execute_trade(signal, trade_time)
                 # 记录持仓（与常规回测保持一致）
                 self.positions.append({
-                    'timestamp': current_time,  # 存储已转换的时间
+                    'timestamp': trade_time,  # 存储已转换的时间
                     'price': signal['price'],
                     'position': self.position,
                     'capital': self.capital
@@ -143,7 +147,7 @@ class TradingEngine:
             signal = self.strategy.get_latest_signal()
             if not signal:
                 continue
-            
+            df = df[:-1] if self.mode == 'live' else df  # 第218行附近
             # 执行交易
             self._execute_trade(signal, current_time)
             # 记录持仓
@@ -217,11 +221,13 @@ class TradingEngine:
                     if start_ts >= end_ts:
                         break
                 
-                # 处理数据（使用winMoney的处理方式）
-                df = process_kline_data(klines)
-                df = df[-200:]  # 保留最近200根K线
-                # 更新策略数据
-                self.strategy.update_data(df)
+                    # 修改数据获取后的处理逻辑（约218行附近）
+                    df = process_kline_data(klines)
+                    df = df[:-1] if self.mode == 'live' else df  # 实盘模式排除最新未闭合K线
+                    df = df[-200:]  # 保留最近200根K线
+
+                    # 更新策略数据（保持原有逻辑）
+                    self.strategy.update_data(df)
                 
                 # 获取信号（后续逻辑保持不变）
 
@@ -230,30 +236,28 @@ class TradingEngine:
                     self._execute_real_trade(signal)
                 print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 # 间隔与策略周期一致（例如1小时策略间隔3600秒）
-                self.stop_event.wait(10)
+                self.stop_event.wait(5)
 
             except Exception as e:
                 self.logger.error(f"数据获取异常: {str(e)}")
                 time.sleep(10)
     
     def _process_klines(self, klines):
-        """处理币安K线数据为DataFrame（修复列名和格式）"""
+        # 原始处理逻辑
         df = pd.DataFrame(klines, columns=[
-            'datetime', 'open', 'high', 'low', 'close', 'volume',  # 修改列名匹配回测数据
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_volume', 'trades',
             'taker_buy_base', 'taker_buy_quote', 'ignore'
         ])
         
-        # 统一时间格式为datetime类型
-        df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
-        df.set_index('datetime', inplace=True)
+        # 新增精确时间处理
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Shanghai')  # 统一时区
         
-        # 确保数值类型一致
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        df[numeric_cols] = df[numeric_cols].astype(float)
-        
-        # 添加与回测数据相同的timestamp列（毫秒时间戳）
-        df['timestamp'] = (df.index.astype('int64') // 10**6).astype(int)
+        # 新增精度处理（币安返回字符串需要精确转换）
+        numeric_cols = ['open', 'high', 'low', 'close']
+        df[numeric_cols] = df[numeric_cols].apply(lambda x: x.astype('decimal.Decimal'))
+        df[numeric_cols] = df[numeric_cols].astype('float64').round(4)  # 保留4位小数
         
         return df
 
@@ -347,7 +351,7 @@ class TradingEngine:
     
         self.near_stop_loss  = False
         if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss):
-            entry_price = max(signal_info['price'] * (1 - 0.003), current_low)
+            entry_price = max(signal_info['price'] * (1 - 0.005), current_low)
             if self.position < 0:  # 如果当前是空头仓位
                 self._close_position('做空持仓冲突平仓', current_price, current_time)
             elif is_price_valid(entry_price, '做多'):
@@ -382,7 +386,7 @@ class TradingEngine:
                         timestamp=current_time
                     )
         elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss):
-            entry_price = min(signal_info['price'] * (1 + 0.003), current_high)
+            entry_price = min(signal_info['price'] * (1 + 0.005), current_high)
             if self.position > 0:  # 如果当前是空头仓位
                 self._close_position('做多持仓冲突平仓', current_price, current_time)
             elif is_price_valid(entry_price, '做空'):
@@ -469,10 +473,10 @@ class TradingEngine:
             current_price = float(ticker['price'])
             price = current_price
             # 根据方向调整挂单价格
-            if signal_info['signal'] == '做多' and signal_info['price'] > current_price:
-                price = current_price * 0.997  # 当前价下方0.1%挂单
-            elif signal_info['signal'] == '做空' and signal_info['price'] < current_price:
-                price = current_price * 1.003  # 当前价上方0.1%挂单
+            if signal_info['signal'] == '做多':
+                price = signal_info['price'] * 0.997  # 当前价下方0.1%挂单
+            elif signal_info['signal'] == '做空':
+                price = signal_info['price'] * 1.003  # 当前价上方0.1%挂单
             else:
                 price = signal_info['price']
 
@@ -530,7 +534,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (6000) / price
+            quantity = (100) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()
@@ -559,11 +563,21 @@ class TradingEngine:
             else:
                 print("HOLD 信号")
                 return
-            # 调用trade_controller的place_order
+            # 修改后的限价单检查逻辑
             if has_pending_limit_orders(symbol):
-                self.logger.warning(f"存在未成交限价单，跳过本次挂单 | {symbol}")
-                close_existing_position(symbol)
-                return
+                now = datetime.now()
+                current_hour = now.hour
+                current_minute = now.minute
+                
+                # 每小时只触发一次，且在2分或4分时执行
+                if current_minute in [2, 4] and current_hour != getattr(self, 'last_cleanup_hour', -1):
+                    self.logger.warning(f"存在未成交限价单，执行强制平仓 | {symbol} (当前时间: {now.strftime('%H:%M')})")
+                    close_existing_position(symbol)
+                    self.last_cleanup_hour = current_hour  # 记录最后一次清理的小时
+                    return
+                else:
+                    self.logger.warning(f"存在未成交限价单（已在本小时处理过） | {symbol}")
+                    return
             success = place_order(
                 symbol=symbol,
                 side=side,

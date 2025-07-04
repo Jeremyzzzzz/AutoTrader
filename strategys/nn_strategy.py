@@ -21,7 +21,7 @@ class NNStrategy(BaseStrategy):
         ])
         self.model = None
         self.scaler = None
-        self.seq_length = 30
+        self.seq_length = 48
         print(f"[NNStrategy] 初始化策略，使用数据路径: {config.get('data_path')}")
         self._load_model()
         
@@ -117,7 +117,7 @@ class NNStrategy(BaseStrategy):
         feature_columns = get_feature_columns()
         input_size = len(feature_columns)
         # 从checkpoint直接获取序列长度
-        self.seq_length = 30
+        self.seq_length = checkpoint['config']['seq_length']  # 替换原来的硬编码30
         
         # 加载增强版模型结构（确保与训练器模型类一致）
         self.model = EnhancedSOLModel(input_size=input_size)
@@ -202,8 +202,12 @@ class NNStrategy(BaseStrategy):
                 print(f"[NNStrategy] 数据不足，需要{self.seq_length}条，当前{len(self.cached_data)}条")
                 return 'HOLD', 0, (None, None)
 
+            # 统一截取指定长度的输入数据
+            input_data = self.cached_data[-self.seq_length:]
+            print(f"[INPUT] 统一输入长度: {len(input_data)}根K线")  # 新增调试日志
+
             # 准备特征数据
-            features = self._prepare_features(self.cached_data)
+            features = self._prepare_features(input_data)
             
             # === 修改为直接使用 is_filter_data 函数 ===
             # 获取最新K线的原始数据
@@ -211,7 +215,8 @@ class NNStrategy(BaseStrategy):
             last_high = self.cached_data['high'].iloc[-1]
             last_low = self.cached_data['low'].iloc[-1]
             last_close = self.cached_data['close'].iloc[-1]
-            
+            print(f"[INPUT] 最新K线: {last_open:.2f} {last_high:.2f} {last_low:.2f} {last_close:.2f}")
+            # 修改数据获取后的处理逻辑（约218行附近）
             # 直接调用过滤函数进行判断
             if not is_filter_data(last_high, last_low, last_close, last_open):
                 print("[NNStrategy] 未通过过滤器条件，保持观望")
