@@ -68,6 +68,56 @@ class TradingEngine:
         self.entry_time = None  # 新增入场时间跟踪
         self.holding_hours = 100  # 新增持仓时长配置
     
+        # 在TradingEngine类中添加新方法
+    def run_quick_backtest(self, start_date, end_date):
+        """实时回测（从交易所获取历史数据）"""
+        # 强制使用交易所数据源
+        self.data_adapter.source = 'binance'
+        
+        # 获取历史数据
+        symbol = self.strategy.symbol + "USDT"
+        data = self.data_adapter.load_data(
+            symbol,
+            self.strategy.timeframe,
+            start_date,
+            end_date
+        )
+        
+        # 运行回测逻辑（复用原有回测流程）
+        self._run_backtest_core(data, start_date, end_date)
+        return self._generate_report()
+
+    def _run_backtest_core(self, data, start_date, end_date):
+        """复用回测核心逻辑"""
+        print(f"Starting realtime backtest from {start_date} to {end_date}")
+        
+        # 清空历史记录
+        self.positions = []
+        self.trades = []
+        
+        for i in range(len(data)):
+            current_data = data.iloc[:i+1]
+            current_time = data.index[i]
+            # 转换为北京时间 (UTC+8)
+            current_time = current_time.tz_localize('UTC').tz_convert('Asia/Shanghai').tz_localize(None)
+            self.strategy.update_data(current_data)
+            signal = self.strategy.get_latest_signal()
+            
+            if signal:
+                self._execute_trade(signal, current_time)
+                # 记录持仓（与常规回测保持一致）
+                self.positions.append({
+                    'timestamp': current_time,  # 存储已转换的时间
+                    'price': signal['price'],
+                    'position': self.position,
+                    'capital': self.capital
+                })
+        
+        # 统一生成报告
+        self.backtest_start = start_date
+        self.backtest_end = end_date
+        return self.real_generate_report()
+
     def run_backtest(self, start, end):
         """运行回测"""
         if self.mode != self.MODE_BACKTEST:
@@ -170,7 +220,10 @@ class TradingEngine:
                 # 处理数据（使用winMoney的处理方式）
                 df = process_kline_data(klines)
                 df = df[-200:]  # 保留最近200根K线
-                
+                # 在处理df之前添加
+                if hasattr(self, 'last_processed'):
+                    df = df[df['timestamp'] > self.last_processed]
+                self.last_processed = datetime.now()
                 # 更新策略数据
                 self.strategy.update_data(df)
                 
@@ -220,6 +273,7 @@ class TradingEngine:
         """在回测中执行多空交易"""
         current_timestamp = self.strategy.data.index[-1]
         price = signal_info['price']
+        print(f"signal_info['price'] is ====>{signal_info['price']}")
         take_profit = signal_info.get('take_profit', 0)
         stop_loss = signal_info.get('stop_loss', 0)
         signal_type = signal_info.get('signal', 'HOLD')
@@ -227,6 +281,15 @@ class TradingEngine:
         current_price = self.strategy.data['close'].iloc[-1]
         current_high = self.strategy.data['high'].iloc[-1]
         current_low = self.strategy.data['low'].iloc[-1]
+
+        # 新增价格验证逻辑
+        def is_price_valid(signal_price, signal_type):
+            """验证信号价格是否在当前K线范围内"""
+            if signal_type == '做多':
+                return current_low <= signal_price <= current_high
+            elif signal_type == '做空':
+                return current_low <= signal_price <= current_high
+            return False
         # 初始化加仓计数器
         if not hasattr(self, 'max_added'):
             self.max_added = 0
@@ -254,8 +317,10 @@ class TradingEngine:
                 elif (signal_info['signal'] == '做多' and self.entry_price <= current_price):
                     self._close_position('做空止损', current_price, current_time)
                 elif current_low <= self.take_profit:
+                    print(f"current_low is ==>{current_low}, self.take_profit is ==>{self.take_profit}")
                     self._close_position('做空止盈', self.take_profit, current_time)
                 elif (signal_info['signal'] == '做多' and self.entry_price > current_price):
+                    print(f"self.entry_price is ==>{self.entry_price}, current_price is ==>{current_price}")
                     self._close_position('做空止盈', current_price, current_time)
  
 
@@ -285,14 +350,16 @@ class TradingEngine:
                 self._close_position('做空信号改变平仓', current_price, current_time)
     
         self.near_stop_loss  = False
-        if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss)and current_price <= price:
+        if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss):
+            entry_price = max(signal_info['price'] * (1 - 0.003), current_low)
             if self.position < 0:  # 如果当前是空头仓位
                 self._close_position('做空持仓冲突平仓', current_price, current_time)
-            else:
+            elif is_price_valid(entry_price, '做多'):
                 self.holding_hours = signal_info.get('holding_time', 100)  # 从信号获取持仓时间
                 self.entry_time = current_time  # 记录入场时间
                 # 记录止损止盈价格（示例：3%止盈，2%止损）
-                entry_price = current_price
+                
+                is_price_valid(price, '做空')
                 self.take_profit = take_profit
                 self.stop_loss = stop_loss
                 
@@ -318,12 +385,11 @@ class TradingEngine:
                         stop_loss=self.stop_loss,
                         timestamp=current_time
                     )
-        elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss) and current_price >= price:
+        elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss):
+            entry_price = min(signal_info['price'] * (1 + 0.003), current_high)
             if self.position > 0:  # 如果当前是空头仓位
                 self._close_position('做多持仓冲突平仓', current_price, current_time)
-            else:
-                # 记录止损止盈价格
-                entry_price = price
+            elif is_price_valid(entry_price, '做空'):
                 self.take_profit = take_profit
                 self.stop_loss = stop_loss
                 self.holding_hours = signal_info.get('holding_time', 100)  # 从信号获取持仓时间
@@ -335,7 +401,7 @@ class TradingEngine:
                 if (self.near_stop_loss):
                     self._open_position(
                         trade_type='做空加仓',
-                        price=current_price,
+                        price=entry_price,
                         quantity=-quantity * 2,
                         take_profit=self.take_profit,
                         stop_loss=self.stop_loss,
@@ -344,7 +410,7 @@ class TradingEngine:
                 else:
                     self._open_position(
                     trade_type='做空',
-                    price=current_price,
+                    price=entry_price,
                     quantity=-quantity,
                     take_profit=self.take_profit,
                     stop_loss=self.stop_loss,
@@ -408,9 +474,9 @@ class TradingEngine:
             price = current_price
             # 根据方向调整挂单价格
             if signal_info['signal'] == '做多' and signal_info['price'] > current_price:
-                price = current_price * 0.999  # 当前价下方0.1%挂单
+                price = current_price * 0.997  # 当前价下方0.1%挂单
             elif signal_info['signal'] == '做空' and signal_info['price'] < current_price:
-                price = current_price * 1.001  # 当前价上方0.1%挂单
+                price = current_price * 1.003  # 当前价上方0.1%挂单
             else:
                 price = signal_info['price']
 
@@ -500,6 +566,7 @@ class TradingEngine:
             # 调用trade_controller的place_order
             if has_pending_limit_orders(symbol):
                 self.logger.warning(f"存在未成交限价单，跳过本次挂单 | {symbol}")
+                close_existing_position(symbol)
                 return
             success = place_order(
                 symbol=symbol,
@@ -532,6 +599,30 @@ class TradingEngine:
             self.logger.error(f"交易执行失败：{str(e)}", exc_info=True)
             # 失败后取消所有未完成订单
     
+    def real_generate_report(self):
+        """生成统一格式的回测报告"""
+        if not self.positions:
+            self.performance = {'error': 'No positions recorded'}
+            return self.performance
+        
+        # 生成报告路径（使用回测时间范围）
+        report_name = f"{self.backtest_start.strftime('%Y%m%d')}-{self.backtest_end.strftime('%Y%m%d')}_report.xlsx"
+        report_path = os.path.join("回测报告", report_name)
+        
+        # 保存交易记录和持仓记录
+        with pd.ExcelWriter(report_path, engine='openpyxl') as writer:
+            pd.DataFrame(self.trades).to_excel(writer, sheet_name='交易明细', index=False)
+            pd.DataFrame(self.positions).to_excel(writer, sheet_name='持仓记录', index=False)
+        
+        # 计算绩效指标（与常规回测保持一致）
+        self.performance = {
+            'start_date': self.backtest_start,
+            'end_date': self.backtest_end,
+            'final_equity': self.capital,
+            'total_return': (self.capital - self.initial_capital) / self.initial_capital,
+            'report_path': os.path.abspath(report_path)
+        }
+        return self.performance
     def _generate_report(self):
         """生成回测报告"""
         if not self.positions:

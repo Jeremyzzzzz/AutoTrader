@@ -185,14 +185,16 @@ class NNStrategy(BaseStrategy):
                 data['timestamp'] = pd.to_datetime(data['timestamp'])
                 data = data.set_index('timestamp')
 
-            # 简化数据缓存逻辑（移除外部数据加载）
+            # 修改后的数据缓存逻辑
             if not hasattr(self, 'cached_data') or self.cached_data.empty:
-                self.cached_data = data
+                self.cached_data = data.iloc[-self.seq_length*3:]
             else:
-                # 仅当收到新数据时追加（修复时间比较逻辑）
-                last_cached_time = self.cached_data.index[-1]
-                if data.index[-1] > last_cached_time:
-                    self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
+                # 精确匹配时间戳避免重复
+                new_data = data[~data.index.isin(self.cached_data.index)]
+                if not new_data.empty:
+                    self.cached_data = pd.concat([self.cached_data, new_data])
+                    # 严格限制数据长度
+                    self.cached_data = self.cached_data.iloc[-self.seq_length*3:]
             
             # 保留最近3倍序列长度的数据（原逻辑保留）
             self.cached_data = self.cached_data[-self.seq_length*3:]
@@ -246,13 +248,13 @@ class NNStrategy(BaseStrategy):
             if signal_idx == 1:  # 做多
                 return '做多', 0.5, (
                     entry_price * (1 + take_profit * 1.7),
-                    entry_price * (1 - stop_loss * 1.7),
+                    entry_price * (1 - stop_loss * 1),
                     100  # 添加持仓时间（小时）
                 )
             elif signal_idx == 2:  # 做空
                 return '做空', 0.5, (
                     entry_price * (1 - take_profit * 1.7),
-                    entry_price * (1 + stop_loss * 1.7),
+                    entry_price * (1 + stop_loss * 1),
                     100  # 添加持仓时间（小时）
                 )
             else:  # 观望

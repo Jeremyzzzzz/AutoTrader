@@ -3,7 +3,7 @@
         "symbols": ["SOL_USDT_USDT"],
         "timeframe": "1h",
         "data_path": "回测数据训练集",
-        "epochs": 1000,
+        "epochs": 1500,
         "batch_size": 64,
         "seq_length": 30,
         "atr_period": 14,
