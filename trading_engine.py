@@ -220,10 +220,6 @@ class TradingEngine:
                 # 处理数据（使用winMoney的处理方式）
                 df = process_kline_data(klines)
                 df = df[-200:]  # 保留最近200根K线
-                # 在处理df之前添加
-                if hasattr(self, 'last_processed'):
-                    df = df[df['timestamp'] > self.last_processed]
-                self.last_processed = datetime.now()
                 # 更新策略数据
                 self.strategy.update_data(df)
                 
@@ -534,7 +530,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (3000) / price
+            quantity = (6000) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()
