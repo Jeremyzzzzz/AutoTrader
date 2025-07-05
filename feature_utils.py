@@ -185,6 +185,6 @@ def prepare_features(data):
     # sns.heatmap(corr_matrix, annot=False, cmap='coolwarm', center=0)
     # plt.title('Feature Correlation Matrix')
     # plt.savefig('feature_correlation.png')
-    # plt.close()
+    # plt.close()/做多/做空）: [6.1025112e-06 2.7324775e-01 7.2674614e-01]
     # 最终返回时保留有效样本
     return df[df['valid_mask']][get_feature_columns()].dropna()

@@ -94,12 +94,13 @@ class TradingEngine:
         # 清空历史记录
         self.positions = []
         self.trades = []
-        
-        for i in range(len(data)):
+        init_window = max(self.strategy.seq_length, 72)  # 取序列长度和特征窗口的较大值
+        for i in range(init_window, len(data)):
+
             # 修改为仅使用已闭合K线（排除最新未闭合K线）
             current_data = data.iloc[:i]  # 从 [i+1] 改为 [i]
-            if len(current_data) == 0:
-                continue
+            if self.mode == self.MODE_BACKTEST:
+                current_data = current_data[:-1]  # 回测模式也排除最新K线
                 
             current_time = data.index[i-1]  # 使用前一闭合K线时间
             # 转换为北京时间 (UTC+8)
@@ -196,7 +197,7 @@ class TradingEngine:
                 print(f"symbol is ===>{symbol}")
                 # 计算时间范围（获取最近3天数据）
                 end_dt = datetime.now()
-                start_dt = end_dt - timedelta(days=31)
+                start_dt = end_dt - timedelta(days=3)
                 end_ts = int(end_dt.timestamp() * 1000)
                 start_ts = int(start_dt.timestamp() * 1000)
                 # 检查持仓时间
@@ -335,13 +336,13 @@ class TradingEngine:
         #         self.logger.info(f"已有{current_side}仓位，跳过{signal_side}开仓")
         #         return
         # 新增持仓时间检查
-        if self.position != 0 and self.entry_time is not None:
-            hours_held = (current_time - self.entry_time).total_seconds() / 3600
-            if hours_held >= self.holding_hours:
-                if self.position > 0:
-                    self._close_position('做多超时平仓', current_price, current_time)
-                else:
-                    self._close_position('做空超时平仓', current_price, current_time)
+        # if self.position != 0 and self.entry_time is not None:
+        #     hours_held = (current_time - self.entry_time).total_seconds() / 3600
+        #     if hours_held >= self.holding_hours:
+        #         if self.position > 0:
+        #             self._close_position('做多超时平仓', current_price, current_time)
+        #         else:
+        #             self._close_position('做空超时平仓', current_price, current_time)
 
         if self.position != 0 and signal_info['signal'] == 'HOLD':
             if self.position > 0:
@@ -534,7 +535,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (100) / price
+            quantity = (6000) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()

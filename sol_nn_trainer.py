@@ -21,7 +21,7 @@ class SOLDataset(Dataset):
     def __init__(self, features, labels):
         self.features = torch.FloatTensor(features)
         self.labels = torch.FloatTensor(labels)
-
+        self.seq_length = config['seq_length']  # 替换原来的24
     def __len__(self):
         return len(self.features)
 

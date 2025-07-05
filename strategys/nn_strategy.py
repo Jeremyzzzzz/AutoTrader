@@ -21,7 +21,7 @@ class NNStrategy(BaseStrategy):
         ])
         self.model = None
         self.scaler = None
-        self.seq_length = 48
+        self.seq_length = 72
         print(f"[NNStrategy] 初始化策略，使用数据路径: {config.get('data_path')}")
         self._load_model()
         
@@ -77,6 +77,7 @@ class NNStrategy(BaseStrategy):
                 )
 
     def _prepare_features(self, data):
+
         processed_df = prepare_features(data)
         feature_columns = get_feature_columns()  # 使用统一获取特征列的方法
         
@@ -194,8 +195,8 @@ class NNStrategy(BaseStrategy):
                 if data.index[-1] > last_cached_time:
                     self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
             
-            # 保留最近3倍序列长度的数据（原逻辑保留）
-            self.cached_data = self.cached_data[-self.seq_length*3:]
+            # 保留最近5倍序列长度的数据（原逻辑保留）
+            self.cached_data = self.cached_data[-self.seq_length*5:]
             
             # 数据长度检查（原逻辑保留）
             if len(self.cached_data) < self.seq_length:
@@ -206,9 +207,14 @@ class NNStrategy(BaseStrategy):
             input_data = self.cached_data[-self.seq_length:]
             print(f"[INPUT] 统一输入长度: {len(input_data)}根K线")  # 新增调试日志
 
+            # 新增时间戳打印
+            print(f"[INPUT] 时间范围: {input_data.index[0]} ~ {input_data.index[-1]}")
+            print(f"[INPUT] 最新K线时间: {input_data.index[-1].strftime('%Y-%m-%d %H:%M:%S')}")
             # 准备特征数据
             features = self._prepare_features(input_data)
-            
+            # print(f"[校验] 输入维度:{len(input_data)} | 缓存总量:{len(self.cached_data)}")
+            # print(f"[校验] 最早缓存时间:{self.cached_data.index[0]}") 
+            # print(f"[校验] 最新MA72值:{input_data['ma72'].iloc[-1]:.4f}")
             # === 修改为直接使用 is_filter_data 函数 ===
             # 获取最新K线的原始数据
             last_open = self.cached_data['open'].iloc[-1]
