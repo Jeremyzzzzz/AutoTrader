@@ -98,17 +98,19 @@ class TradingEngine:
         for i in range(init_window, len(data)):
 
             # 修改为仅使用已闭合K线（排除最新未闭合K线）
-            current_data = data.iloc[:i]  # 从 [i+1] 改为 [i]
-            if self.mode == self.MODE_BACKTEST:
-                current_data = current_data[:-1]  # 回测模式也排除最新K线
+            current_data = data.iloc[:i+1]  # 原为 data.iloc[:i]
                 
-            current_time = data.index[i-1]  # 使用前一闭合K线时间
+            # 提前更新时间戳
+            current_time = data.index[i]
             # 转换为北京时间 (UTC+8)
             current_time = current_time.tz_localize('UTC').tz_convert('Asia/Shanghai').tz_localize(None)
             self.strategy.update_data(current_data)
             signal = self.strategy.get_latest_signal()
-            trade_time = current_time + pd.Timedelta(hours=1)  # 最后一根K线后1小时
+            trade_time = current_time  # 最后一根K线后1小时       
+            # 新增数据同步机制
+            self.data_adapter.raw_data = current_data  # 供交易引擎访问原始数据
             if signal:
+                print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
                 self._execute_trade(signal, trade_time)
                 # 记录持仓（与常规回测保持一致）
                 self.positions.append({
@@ -274,18 +276,21 @@ class TradingEngine:
         """在回测中执行多空交易"""
         current_timestamp = self.strategy.data.index[-1]
         price = signal_info['price']
-        print(f"signal_info['price'] is ====>{signal_info['price']}")
         take_profit = signal_info.get('take_profit', 0)
         stop_loss = signal_info.get('stop_loss', 0)
         signal_type = signal_info.get('signal', 'HOLD')
         # print(f"current_timestamp is ==>{current_timestamp},  signal_info['signal'] is ==>{signal_info['signal']}, price is =>{price}, take_profit is =>{take_profit}, stop_loss is =>{stop_loss}, signal_type is =>{signal_type}")
-        current_price = self.strategy.data['close'].iloc[-1]
-        current_high = self.strategy.data['high'].iloc[-1]
-        current_low = self.strategy.data['low'].iloc[-1]
+        # 正确方式：使用最后一条数据
+        # 获取策略数据中的最新K线（原代码使用iloc[-1]）
+        current_bar = self.strategy.data.iloc[-1] if not self.strategy.data.empty else None
+        current_high = current_bar['high']
+        current_low = current_bar['low']
+        current_price = current_bar['close']
 
         # 新增价格验证逻辑
         def is_price_valid(signal_price, signal_type):
             """验证信号价格是否在当前K线范围内"""
+            print(f"|验证价格是否在当前K线范围内|, entry_price is ==>{signal_price}, current_price is ===>{current_price}, current_low is ===>{current_low}, current_high is ===>{current_high}")
             if signal_type == '做多':
                 return current_low <= signal_price <= current_high
             elif signal_type == '做空':
@@ -352,15 +357,15 @@ class TradingEngine:
     
         self.near_stop_loss  = False
         if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss):
-            entry_price = max(signal_info['price'] * (1 - 0.005), current_low)
+            entry_price = signal_info['price'] * (1 - 0.003)
+            print(f"signal_info['price'] is ====>{signal_info['price']}")
             if self.position < 0:  # 如果当前是空头仓位
                 self._close_position('做空持仓冲突平仓', current_price, current_time)
             elif is_price_valid(entry_price, '做多'):
                 self.holding_hours = signal_info.get('holding_time', 100)  # 从信号获取持仓时间
                 self.entry_time = current_time  # 记录入场时间
                 # 记录止损止盈价格（示例：3%止盈，2%止损）
-                
-                is_price_valid(price, '做空')
+
                 self.take_profit = take_profit
                 self.stop_loss = stop_loss
                 
@@ -387,7 +392,8 @@ class TradingEngine:
                         timestamp=current_time
                     )
         elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss):
-            entry_price = min(signal_info['price'] * (1 + 0.005), current_high)
+            entry_price = signal_info['price'] * (1 + 0.003)
+            print(f"signal_info['price'] is ====>{signal_info['price']}")
             if self.position > 0:  # 如果当前是空头仓位
                 self._close_position('做多持仓冲突平仓', current_price, current_time)
             elif is_price_valid(entry_price, '做空'):
@@ -446,18 +452,22 @@ class TradingEngine:
         print(f"时间: {timestamp.strftime('%Y-%m-%d %H:%M')}")
         print(f"类型: {close_type} | 价格: {price:.4f}")
         print(f"入场价: {self.entry_price:.4f} | 盈亏: {price - self.entry_price:.4f}")
-        
+        # 当前使用策略最新价格，应区分平仓类型
+        if '止损' in close_type or '止盈' in close_type:
+            close_price = self.strategy.data['close'].iloc[-1]  # 使用K线收盘价
+        elif '信号改变' in close_type:
+            close_price = self.strategy.data['open'].iloc[-1]  # 使用下根K线开盘价
         close_quantity = abs(self.position)
-        fee = close_quantity * price * 0.0002
-        proceeds = close_quantity * price - fee
+        fee = close_quantity * close_price * 0.0002
+        proceeds = close_quantity * close_price - fee
         
         self.trades.append({
             'timestamp': timestamp,
             '类型': close_type,
-            '价格': price,
+            '价格': close_price,
             '数量': close_quantity,
-            '收益': (price - self.entry_price) * close_quantity - fee if '做多' in close_type 
-                else (self.entry_price - price) * close_quantity - fee,
+            '收益': (close_price - self.entry_price) * close_quantity - fee if '做多' in close_type 
+                else (self.entry_price - close_price) * close_quantity - fee,
             '手续费': fee
         })
         self.near_stop_loss = False

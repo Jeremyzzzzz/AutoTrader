@@ -196,7 +196,7 @@ class NNStrategy(BaseStrategy):
                     self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
             
             # 保留最近5倍序列长度的数据（原逻辑保留）
-            self.cached_data = self.cached_data[-self.seq_length*5:]
+            self.cached_data = self.cached_data[-self.seq_length*100:]
             
             # 数据长度检查（原逻辑保留）
             if len(self.cached_data) < self.seq_length:

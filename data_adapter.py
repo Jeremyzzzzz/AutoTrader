@@ -99,7 +99,7 @@ class DataAdapter:
         current_start = start
         
         while current_start < end:
-            current_end = min(current_start + timedelta(days=30), end)
+            current_end = min(current_start + timedelta(days=20), end)
             
             # 修改为合约接口，添加futures_前缀
             klines = self.binance_client.futures_klines(
@@ -107,7 +107,7 @@ class DataAdapter:
                 interval=timeframe,
                 startTime=int(current_start.timestamp() * 1000),  # 合约接口使用时间戳
                 endTime=int(current_end.timestamp() * 1000),
-                limit=500  # 合约接口单次最大500条
+                limit=480  # 合约接口单次最大500条
             )
             
             if not klines:
