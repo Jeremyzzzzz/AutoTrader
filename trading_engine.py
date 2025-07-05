@@ -98,20 +98,22 @@ class TradingEngine:
         for i in range(init_window, len(data)):
 
             # 修改为仅使用已闭合K线（排除最新未闭合K线）
-            current_data = data.iloc[:i+1]  # 原为 data.iloc[:i]
+            current_data = data.iloc[:i]  # 原为 data.iloc[:i]
                 
             # 提前更新时间戳
             current_time = data.index[i]
             # 转换为北京时间 (UTC+8)
             current_time = current_time.tz_localize('UTC').tz_convert('Asia/Shanghai').tz_localize(None)
+            print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
             self.strategy.update_data(current_data)
             signal = self.strategy.get_latest_signal()
-            trade_time = current_time  # 最后一根K线后1小时       
+            trade_time = current_time  # 最后一根K线后1小时  
+            # 新增：获取当前处理时段的完整K线数据（第i根K线）
+            current_kline = data.iloc[i]  # 新增代码     
             # 新增数据同步机制
             self.data_adapter.raw_data = current_data  # 供交易引擎访问原始数据
             if signal:
-                print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-                self._execute_trade(signal, trade_time)
+                self._execute_trade(signal, trade_time, current_kline)
                 # 记录持仓（与常规回测保持一致）
                 self.positions.append({
                     'timestamp': trade_time,  # 存储已转换的时间
@@ -272,7 +274,7 @@ class TradingEngine:
             self.running = False
             self.logger.info("Live trading stopped")
 
-    def _execute_trade(self, signal_info, current_time):
+    def _execute_trade(self, signal_info, current_time, current_kline):
         """在回测中执行多空交易"""
         current_timestamp = self.strategy.data.index[-1]
         price = signal_info['price']
@@ -282,10 +284,9 @@ class TradingEngine:
         # print(f"current_timestamp is ==>{current_timestamp},  signal_info['signal'] is ==>{signal_info['signal']}, price is =>{price}, take_profit is =>{take_profit}, stop_loss is =>{stop_loss}, signal_type is =>{signal_type}")
         # 正确方式：使用最后一条数据
         # 获取策略数据中的最新K线（原代码使用iloc[-1]）
-        current_bar = self.strategy.data.iloc[-1] if not self.strategy.data.empty else None
-        current_high = current_bar['high']
-        current_low = current_bar['low']
-        current_price = current_bar['close']
+        current_high = current_kline['high']
+        current_low = current_kline['low']
+        current_price = current_kline['close']
 
         # 新增价格验证逻辑
         def is_price_valid(signal_price, signal_type):
@@ -357,7 +358,7 @@ class TradingEngine:
     
         self.near_stop_loss  = False
         if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss):
-            entry_price = signal_info['price'] * (1 - 0.003)
+            entry_price = signal_info['price'] * (1 - 0.01)
             print(f"signal_info['price'] is ====>{signal_info['price']}")
             if self.position < 0:  # 如果当前是空头仓位
                 self._close_position('做空持仓冲突平仓', current_price, current_time)
@@ -392,7 +393,7 @@ class TradingEngine:
                         timestamp=current_time
                     )
         elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss):
-            entry_price = signal_info['price'] * (1 + 0.003)
+            entry_price = signal_info['price'] * (1 + 0.01)
             print(f"signal_info['price'] is ====>{signal_info['price']}")
             if self.position > 0:  # 如果当前是空头仓位
                 self._close_position('做多持仓冲突平仓', current_price, current_time)
@@ -485,9 +486,9 @@ class TradingEngine:
             price = current_price
             # 根据方向调整挂单价格
             if signal_info['signal'] == '做多':
-                price = signal_info['price'] * 0.997  # 当前价下方0.1%挂单
+                price = signal_info['price'] * 0.99  # 当前价下方0.1%挂单
             elif signal_info['signal'] == '做空':
-                price = signal_info['price'] * 1.003  # 当前价上方0.1%挂单
+                price = signal_info['price'] * 1.01  # 当前价上方0.1%挂单
             else:
                 price = signal_info['price']
 
@@ -545,7 +546,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (6000) / price
+            quantity = (7000) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()
