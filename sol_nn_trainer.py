@@ -120,17 +120,18 @@ class SOLTrainer:
 
     def create_sequences(self, data, labels):
         xs, ys = [], []
-        # 扩展时间窗口到72小时（24+48）
-        for i in range(len(data)-self.seq_length-72):  
-            # 仅当原始数据点包含有效信号时才创建样本
-            if labels[i+self.seq_length][0] in [1, 2]:
-                # 确保包含完整的时间窗口
-                if (i + self.seq_length + 72) < len(data):
+        # 修改1：调整时间窗口为4小时（原72改为4+24）
+        predict_time = 2
+        for i in range(len(data)-self.seq_length- 24 - predict_time):  # 4+24=28
+            # 修改2：预测4小时后的信号
+            if labels[i+predict_time][0] in [1, 2]:  # 原i+self.seq_length改为i+4
+                # 修改3：调整验证窗口
+                if (i + predict_time + 24) < len(data):  # 保留24小时验证窗口
                     xs.append(data[i:i+self.seq_length])
                     ys.append([
-                        labels[i+self.seq_length][0], 
-                        labels[i+self.seq_length][1],
-                        labels[i+self.seq_length][2]
+                        labels[i+predict_time][0],  # 预测4小时后
+                        labels[i+predict_time][1],
+                        labels[i+predict_time][2]
                     ])
         return np.array(xs), np.array(ys)
 

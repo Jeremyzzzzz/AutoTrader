@@ -108,7 +108,7 @@ def main():
             print("\nStopping trading...")
             engine.stop()
 
-    elif args.mode == 'quick_backtest':  # 新增模式
+    elif args.mode == 'quick_backtest':  # 新增模式7
         start_date = datetime(2025, 3, 1)  # 可改为参数化
         end_date = datetime(2025, 7, 8)
         

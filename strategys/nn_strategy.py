@@ -256,14 +256,14 @@ class NNStrategy(BaseStrategy):
             # 生成交易信号
             if signal_idx == 1:  # 做多
                 return '做多', 0.5, (
-                    entry_price * (1 + take_profit * 1.7),
-                    entry_price * (1 - stop_loss * 1.7),
+                    entry_price * (1 + take_profit * 10),
+                    entry_price * (1 - stop_loss * 10),
                     100  # 添加持仓时间（小时）
                 )
             elif signal_idx == 2:  # 做空
                 return '做空', 0.5, (
-                    entry_price * (1 - take_profit * 1.7),
-                    entry_price * (1 + stop_loss * 1.7),
+                    entry_price * (1 - take_profit * 10),
+                    entry_price * (1 + stop_loss * 10),
                     100  # 添加持仓时间（小时）
                 )
             else:  # 观望
