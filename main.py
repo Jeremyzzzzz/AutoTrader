@@ -12,6 +12,8 @@ from data_adapter import DataAdapter
 from trading_engine import TradingEngine
 import time
 import json
+from strategys.upper_shadow_strategy import UpperShadowStrategy
+
 def main():
     import asyncio
     import sys
@@ -75,6 +77,21 @@ def main():
         'data_path': args.data_path,
         'mode': args.mode  # 明确传递运行模式
     }, data_adapter)
+    # strategy = UpperShadowStrategy(
+    #     config={
+    #         'symbol': args.symbol,
+    #         'timeframe': args.timeframe,
+    #         'params': {  # 添加上影线策略参数
+    #             'upper_shadow_ratio': 3.0,
+    #             'lower_shadow_ratio': 0.3,
+    #             'entry_multiplier': 0.5,
+    #             'tp_multiplier': 0.5,
+    #             'sl_multiplier': 1.5,
+    #             'holding_hours': 100
+    #         }
+    #     }, 
+    #     data_adapter=data_adapter
+    # )
     # 创建交易引擎
     engine = TradingEngine(
         strategy=strategy,
@@ -85,8 +102,8 @@ def main():
     
     if args.mode == 'backtest':
         # 回测配置
-        end_date = '2025-06-01'
-        start_date = '2025-03-01'
+        end_date = '2025-05-01'
+        start_date = '2025-08-01'
         
         print(f"Starting backtest for {args.symbol} from {start_date} to {end_date}")
         
@@ -109,8 +126,8 @@ def main():
             engine.stop()
 
     elif args.mode == 'quick_backtest':  # 新增模式7
-        start_date = datetime(2025, 3, 1)  # 可改为参数化
-        end_date = datetime(2025, 7, 8)
+        start_date = datetime(2025, 6, 1)  # 可改为参数化
+        end_date = datetime(2025, 8, 1)
         
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
         report = engine.run_quick_backtest(start_date, end_date)

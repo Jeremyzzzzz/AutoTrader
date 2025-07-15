@@ -170,6 +170,30 @@ class NNStrategy(BaseStrategy):
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return tr.rolling(period).mean()
 
+    # 生成交易信号前添加风险检查
+    def _risk_check(self, signal_type, entry_price, cached_data):
+        """风险控制过滤器"""
+        # 1. 波动率检查（过去4小时ATR）
+        atr_4h = self._calculate_atr(cached_data[-24:], period=4).iloc[-1]
+        current_range = cached_data['high'].iloc[-1] - cached_data['low'].iloc[-1]
+        
+        # 2. 趋势强度检查（72周期EMA斜率）
+        ma72 = cached_data['close'].rolling(72).mean()
+        ma72_slope = (ma72.iloc[-1] - ma72.iloc[-6]) / 5  # 最近5根K线斜率
+        
+        # 3. 短期超买超卖检查（6小时RSI）
+        rsi_6h = calculate_rsi(cached_data['close'], period=6).iloc[-1]
+        
+        # 风险规则（可根据需要调整参数）
+        risk_conditions = [
+            current_range > atr_4h * 1.5,          # 当前波动超过平均波动1.5倍
+            abs(ma72_slope) < 0.0005,               # 中期趋势不明朗
+            (signal_type == '做多' and rsi_6h > 70) or 
+            (signal_type == '做空' and rsi_6h < 30) # 短期超买超卖
+        ]
+        
+        return any(risk_conditions)
+
     def on_bar(self, data):
         """接收最新行情数据并生成交易信号"""
         print(f"[NNStrategy] 收到新K线数据，时间: {data.index[-1]}")
@@ -253,7 +277,14 @@ class NNStrategy(BaseStrategy):
             print(f"[DEBUG] 预测信号索引: {signal_idx}")
             entry_price = data['close'].iloc[-1]
             
-            # 生成交易信号
+            #  # 在返回信号前添加风险检查
+            # if signal_idx in [1, 2]:
+            #     signal_type = '做多' if signal_idx == 1 else '做空'
+            #     if self._risk_check(signal_type, entry_price, self.cached_data):
+            #         print(f"[RISK] 风险控制阻止 {signal_type} 信号 | 当前价格:{entry_price:.4f}")
+            #         return 'HOLD', 0, (0, 0, 100)
+            
+            # 生成交易信号（保持原有逻辑）
             if signal_idx == 1:  # 做多
                 return '做多', 0.5, (
                     entry_price * (1 + take_profit * 10),
