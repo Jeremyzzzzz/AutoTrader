@@ -81,11 +81,13 @@ class SOLTrainer:
         clipped_returns = np.clip(returns, -0.99, np.inf)  # 限制收益率范围
         cumulative_returns = np.exp(np.log1p(clipped_returns).cumsum()) - 1
         
-        # 夏普比率计算增加容错
-        if len(returns) < 2 or np.std(returns) == 0:
-            sharpe_ratio = 0.0
-        else:
-            sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252)
+        # 增加时间衰减因子
+        time_decay = np.linspace(1, 0.5, len(returns))  # 近期数据权重更高
+        weighted_returns = returns * time_decay
+        
+        # 修改夏普比率计算
+        if len(returns) > 24:  # 至少24小时数据
+            sharpe_ratio = np.mean(weighted_returns) / np.std(weighted_returns) * np.sqrt(252*24)
         
         # 最大回撤计算优化
         peak = np.maximum.accumulate(cumulative_returns)
@@ -121,7 +123,7 @@ class SOLTrainer:
     def create_sequences(self, data, labels):
         xs, ys = [], []
         # 修改1：调整时间窗口为4小时（原72改为4+24）
-        predict_time = 2
+        predict_time = 5
         for i in range(len(data)-self.seq_length- 24 - predict_time):  # 4+24=28
             # 修改2：预测4小时后的信号
             if labels[i+predict_time][0] in [1, 2]:  # 原i+self.seq_length改为i+4
@@ -141,7 +143,8 @@ class SOLTrainer:
             symbol=symbol,
             timeframe=self.timeframe,
             start=datetime.datetime(2020, 1, 1),
-            end=datetime.datetime(2025, 3, 1)
+            end=datetime.datetime(2025, 3, 1),
+            btc_symbol='BTC_USDT_USDT'  # 新增BTC数据参数
         )
         # 使用统一特征工程（先生成原始特征）
         processed_df = prepare_features(raw_data)
@@ -177,7 +180,7 @@ class SOLTrainer:
         signal_criterion = nn.CrossEntropyLoss()
         price_criterion = nn.HuberLoss()
     
-        # === 新增特征重要性分析 ===
+        # === 新增特征重要性分析 ===tt
         # # 使用随机森林进行初步特征筛选
         # rf = RandomForestClassifier(n_estimators=100)
         # rf.fit(features, processed_df['signal'])

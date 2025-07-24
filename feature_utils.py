@@ -92,7 +92,7 @@ def get_feature_columns():
     return [
         'open', 'high', 'low', 'close', 'volume',
         'ma6', 'ma24', 'ma72', 'rsi_ma6', 'atr_macd',
-        'atr',
+        'atr', 'sol_btc_ratio', 'sol_btc_ratio_ma6',  # 新增SOL/BTC比率特征
         'rsi', 'macd', 'macd_signal', 'volume_ratio','signal', 'stop_loss', 'take_profit','filter_data'
     ]
 
@@ -126,10 +126,6 @@ def prepare_features(data):
     df['ma6'] = df['close'].shift(1).rolling(6, min_periods=1).mean()
     df['ma24'] = df['close'].shift(1).rolling(24, min_periods=1).mean()
     df['ma72'] = df['close'].shift(1).rolling(72, min_periods=1).mean()
-    
-    
-    
-
 
     # 波动率特征
     df['atr'] = calculate_atr(df, 14)
@@ -147,10 +143,8 @@ def prepare_features(data):
     df['volume_ratio'] = np.log(df['volume'] / df['volume'].rolling(6).mean() + 1e-6)
     
         # === 新增标签生成 ===
-    future_window = 4
-    atr_multiplier = 1
-    # 建议调整为动态阈值
-    threshold = df['atr'] / df['close'] * 1.5
+    future_window = 4 # 可尝试4/8小时（需与训练代码同步修改）
+    threshold = df['atr'] / df['close'] * 0.5 * (2)  # 增加时间因子
 
     
     # 价格目标
@@ -161,14 +155,27 @@ def prepare_features(data):
     df.loc[df['future_price'] > df['close'] * (1 + threshold), 'signal'] = 1
     df.loc[df['future_price'] < df['close'] * (1 - threshold), 'signal'] = 2
     
-    
+    #  # === 新增数据校验 ===
+    # print("\n=== 数据校验 ===")
+    # print("最新5条SOL收盘价:")
+    # print(df['close'].tail())
+    # print("\n最新5条BTC收盘价:")
+    # print(df['btc_close'].tail())
+    # print(f"\n数据形状: {df.shape}, 缺失值数量: {df[['close', 'btc_close']].isnull().sum()}")
+
+    # === 新增SOL/BTC价格比率特征 ===
+    # 假设数据中包含BTC价格（需要确保数据适配器加载了BTC数据）
+    df['sol_btc_ratio'] = df['close'] / df['btc_close']  # 添加SOL/BTC价格比率
+    df['sol_btc_ratio_ma6'] = df['sol_btc_ratio'].rolling(6).mean()  # 比率6周期均线
+    df['sol_btc_ratio_change'] = df['sol_btc_ratio'].pct_change(3)
+
     # 止损止盈目标 (基于波动率)
     df['stop_loss'] = df['atr'].rolling(future_window).mean() * 1 / df['close']  # 使用未来窗口计算波动率
     df['take_profit'] = df['atr'].rolling(future_window).mean() * 1.5 / df['close']
 
     # 创建有效训练窗口（出现信号前72小时 + 后24小时）
-    window_before = 48  # 前导观察窗口
-    window_after = 12   # 后续跟踪窗口
+    window_before = 72  # 前导观察窗口
+    window_after = 24   # 后续跟踪窗口
     df['valid_mask'] = False
     
     # 标记所有需要保留的样本

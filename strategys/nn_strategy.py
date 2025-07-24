@@ -4,6 +4,7 @@ from strategy import BaseStrategy
 from data_adapter import DataAdapter
 from sklearn.preprocessing import StandardScaler
 from sol_nn_trainer import EnhancedSOLModel
+from sol_nn_alarm_trainer import RiskAlertModel
 from feature_utils import prepare_features, calculate_rsi, calculate_atr, get_feature_columns, is_filter_data
 import pandas as pd
 import torch.nn.functional as F
@@ -24,7 +25,7 @@ class NNStrategy(BaseStrategy):
         self.seq_length = 72
         print(f"[NNStrategy] 初始化策略，使用数据路径: {config.get('data_path')}")
         self._load_model()
-        
+        # self._load_risk_model() 
         # 策略参数
         self.trade_threshold = 0.015  # 1.5% 阈值
         self.stop_loss_pct = 0.015    # 1.5% 止损
@@ -36,6 +37,7 @@ class NNStrategy(BaseStrategy):
         self.log_dir = "logs"
         os.makedirs(self.log_dir, exist_ok=True)
         self.log_file = os.path.join(self.log_dir, f"nn_signals_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx")
+        self.lastSignal = None
 
     def _log_signal(self, signal_probs, kline_data):
         """记录信号日志"""
@@ -170,11 +172,58 @@ class NNStrategy(BaseStrategy):
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return tr.rolling(period).mean()
 
+    def _load_risk_model(self):
+        """加载风险预警模型"""
+        base_symbol = self.symbol.split('_')[0]
+        model_path = os.path.join('model', f"{base_symbol}_USDT_USDT_alarm_model.pth")
+        
+        # 添加安全全局变量（关键修复）
+        import torch.serialization
+        from numpy._core.multiarray import _reconstruct
+        torch.serialization.add_safe_globals([_reconstruct])
+        
+        checkpoint = torch.load(
+            model_path,
+            map_location='cpu',
+            weights_only=False  # 保持与主模型加载方式一致
+        )
+        
+        self.risk_scaler = StandardScaler()
+        self.risk_scaler.mean_ = checkpoint['scaler_mean']
+        self.risk_scaler.scale_ = checkpoint['scaler_scale']
+        
+        feature_columns = get_feature_columns()
+        self.risk_model = RiskAlertModel(len(feature_columns))
+        self.risk_model.load_state_dict(checkpoint['model_state_dict'])
+        self.risk_model.eval()
+
+    # def _risk_check(self, signal_type, entry_price, cached_data):
+    #     """使用神经网络进行风险预测"""
+    #     # 准备输入数据
+    #     features = prepare_features(cached_data)
+    #     scaled_features = self.risk_scaler.transform(features[get_feature_columns()].values[-self.seq_length:])
+    #     input_tensor = torch.FloatTensor(scaled_features).unsqueeze(0)
+        
+    #     with torch.no_grad():
+    #         # 修改输出处理逻辑
+    #         output = self.risk_model(input_tensor)
+    #         # 根据信号类型获取对应风险概率
+    #         if signal_type == '做多':
+    #             risk_prob = output[0][1].item()  # 取做多风险概率
+    #         elif signal_type == '做空':
+    #             risk_prob = output[0][2].item()  # 取做空风险概率
+    #         else:
+    #             risk_prob = 0.0
+        
+    #     # 风险阈值可根据验证集表现调整
+    #     print(f"[NNStrategy] 预测的{signal_type}风险概率: {risk_prob:.2%}")
+    #     return risk_prob > 0.95  # 示例阈值
     # 生成交易信号前添加风险检查
+
     def _risk_check(self, signal_type, entry_price, cached_data):
         """风险控制过滤器"""
-        # 1. 波动率检查（过去4小时ATR）
-        atr_4h = self._calculate_atr(cached_data[-24:], period=4).iloc[-1]
+        # 1. 波动率检查（过去24小时ATR）
+        atr_4h = self._calculate_atr(cached_data[-24:], period=8).iloc[-1]
         current_range = cached_data['high'].iloc[-1] - cached_data['low'].iloc[-1]
         
         # 2. 趋势强度检查（72周期EMA斜率）
@@ -271,27 +320,43 @@ class NNStrategy(BaseStrategy):
             # 获取预测信号 (取概率最高的类别)
             signal_idx = 0
             for idx in signal_probs:
-                if idx > 0.995:
+                if idx > 0.65:
                     print(f"signal_probs is ===>{signal_probs}")
                     signal_idx = np.argmax(signal_probs)
             print(f"[DEBUG] 预测信号索引: {signal_idx}")
             entry_price = data['close'].iloc[-1]
             
-            #  # 在返回信号前添加风险检查
+            # #  # 在返回信号前添加风险检查
             # if signal_idx in [1, 2]:
             #     signal_type = '做多' if signal_idx == 1 else '做空'
             #     if self._risk_check(signal_type, entry_price, self.cached_data):
-            #         print(f"[RISK] 风险控制阻止 {signal_type} 信号 | 当前价格:{entry_price:.4f}")
-            #         return 'HOLD', 0, (0, 0, 100)
+            #         print(f"[RISK] 风险控制触发 {signal_type} 减仓 | 当前价格:{entry_price:.4f}")
+            #         if signal_type == '做多':
+            #             if self.lastSignal != None and self.lastSignal == '做多':
+            #                 return '减仓', 0.5, (  # 仓位系数改为0.25
+            #                     entry_price * (1 + take_profit * 10),
+            #                     entry_price * (1 - stop_loss * 10),
+            #                     100
+            #                 )
+            #         if signal_type == '做空':
+            #             if self.lastSignal != None and self.lastSignal == '做空':
+            #                 return '减仓', 0.5, (  # 仓位系数改为0.25
+            #                     entry_price * (1 + take_profit * 10),
+            #                     entry_price * (1 - stop_loss * 10),
+            #                     100
+            #                 )
+                    # return 'HOLD', 0, (0, 0, 100)
             
             # 生成交易信号（保持原有逻辑）
             if signal_idx == 1:  # 做多
+                self.lastSignal = '做多'
                 return '做多', 0.5, (
                     entry_price * (1 + take_profit * 10),
                     entry_price * (1 - stop_loss * 10),
                     100  # 添加持仓时间（小时）
                 )
             elif signal_idx == 2:  # 做空
+                self.lastSignal = '做空'
                 return '做空', 0.5, (
                     entry_price * (1 - take_profit * 10),
                     entry_price * (1 + stop_loss * 10),

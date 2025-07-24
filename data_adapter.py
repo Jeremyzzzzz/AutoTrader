@@ -18,8 +18,8 @@ class DataAdapter:
         # 创建本地存储目录
         if source == self.SOURCE_LOCAL and path and not os.path.exists(path):
             os.makedirs(path)
-    
-    def load_data(self, symbol, timeframe, start, end):
+
+    def load_data(self, symbol, timeframe, start, end, btc_symbol=None):
         """
         加载历史数据
         :param symbol: 交易对
@@ -30,9 +30,24 @@ class DataAdapter:
         """
         print(f"self.source is ===>{self.source}")
         if self.source == self.SOURCE_LOCAL:
-            return self._load_from_local(symbol, timeframe, start, end)
+            main_df = self._load_from_local(symbol, timeframe, start, end)
+            if btc_symbol:
+                # 加载BTC数据并合并
+                btc_df = self._load_from_local(btc_symbol, timeframe, start, end)
+                main_df = main_df.join(btc_df[['close']].rename(columns={'close': 'btc_close'}), how='left')
+                main_df['btc_close'].fillna(method='ffill', inplace=True)  # 前向填充
+                main_df['btc_close'].fillna(method='bfill', inplace=True)  # 后向填充
+            return main_df
+        
         elif self.source == self.SOURCE_BINANCE:
-            return self._load_from_binance(symbol, timeframe, start, end)
+            main_df = self._load_from_binance(symbol, timeframe, start, end)
+            if btc_symbol:
+                # 加载BTC数据并合并
+                btc_df = self._load_from_binance('BTCUSDT', timeframe, start, end)
+                main_df = main_df.join(btc_df[['close']].rename(columns={'close': 'btc_close'}), how='left')
+                main_df['btc_close'].fillna(method='ffill', inplace=True)  # 前向填充
+                main_df['btc_close'].fillna(method='bfill', inplace=True)  # 后向填充
+            return main_df
         else:
             raise ValueError(f"Unsupported data source: {self.source}")
     
@@ -98,17 +113,32 @@ class DataAdapter:
         data = pd.DataFrame()
         current_start = start
         
+        # 添加日期验证
+        if start >= end:
+            raise ValueError("起始时间必须早于结束时间")
+        
+        max_retries = 5  # 最大重试次数
+        retry_delay = 1  # 初始重试延迟秒数
+        
         while current_start < end:
             current_end = min(current_start + timedelta(days=20), end)
             
-            # 修改为合约接口，添加futures_前缀
-            klines = self.binance_client.futures_klines(
-                symbol=symbol,
-                interval=timeframe,
-                startTime=int(current_start.timestamp() * 1000),  # 合约接口使用时间戳
-                endTime=int(current_end.timestamp() * 1000),
-                limit=480  # 合约接口单次最大500条
-            )
+            # 重试逻辑
+            for attempt in range(max_retries):
+                try:
+                    klines = self.binance_client.futures_klines(
+                        symbol=symbol,
+                        interval=timeframe,
+                        startTime=int(current_start.timestamp() * 1000),
+                        endTime=int(current_end.timestamp() * 1000),
+                        limit=480
+                    )
+                    break  # 成功则退出重试循环
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise RuntimeError(f"获取数据失败，已达最大重试次数: {str(e)}")
+                    print(f"数据获取失败，第{attempt+1}次重试...")
+                    time.sleep(retry_delay * (attempt + 1))
             
             if not klines:
                 break

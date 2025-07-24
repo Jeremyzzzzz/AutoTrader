@@ -49,6 +49,7 @@ class TradingEngine:
         self.capital = capital
         self.trade_fee = trade_fee
         self.position = 0  # 当前持仓数量
+        self.firstPosition = 0
         self.positions = []  # 持仓记录
         self.trades = []  # 交易记录
         self.performance = {}  # 性能指标
@@ -80,9 +81,14 @@ class TradingEngine:
             symbol,
             self.strategy.timeframe,
             start_date,
-            end_date
+            end_date,
+            btc_symbol='BTC_USDT_USDT'  # 新增BTC数据参数
         )
-        
+        # 验证数据日期范围
+        data_start = data.index.min()
+        data_end = data.index.max()
+        print(f"已获取数据，期望截止时间：{end_date}，实际截止时间：{data_end}")
+        time.sleep(5)
         # 运行回测逻辑（复用原有回测流程）
         self._run_backtest_core(data, start_date, end_date)
         return self._generate_report()
@@ -95,6 +101,7 @@ class TradingEngine:
         self.positions = []
         self.trades = []
         init_window = max(self.strategy.seq_length, 72)  # 取序列长度和特征窗口的较大值
+        # init_window = 72
         for i in range(init_window, len(data)):
 
             # 修改为仅使用已闭合K线（排除最新未闭合K线）
@@ -211,6 +218,7 @@ class TradingEngine:
                         self._close_position('时间平仓', self.strategy.data['close'].iloc[-1], datetime.now())
                 # 分页获取K线数据（与winMoney.py保持一致）
                 klines = []
+                btc_klines = []
                 while True:
                     chunk = self.binance_client.futures_klines(
                         symbol=symbol,
@@ -219,18 +227,49 @@ class TradingEngine:
                         endTime=end_ts,
                         limit=500
                     )
+
                     if not chunk:
                         break
                     klines.extend(chunk)
-                    start_ts = chunk[-1][0] + 1  # 更新起始时间为最后一条K线时间+1ms
-                    if start_ts >= end_ts:
-                        break
                 
                     # 修改数据获取后的处理逻辑（约218行附近）
                     df = process_kline_data(klines)
                     df = df[:-1] if self.mode == 'live' else df  # 实盘模式排除最新未闭合K线
                     df = df[-200:]  # 保留最近200根K线
 
+          
+                    btc_chunk = self.binance_client.futures_klines(
+                        symbol='BTCUSDT',
+                        interval=interval,
+                        startTime=start_ts,
+                        endTime=end_ts,
+                        limit=500
+                    )
+                    if not btc_chunk:
+                        break
+                    btc_klines.extend(btc_chunk)
+                    start_ts = chunk[-1][0] + 1  # 更新起始时间为最后一条K线时间+1ms
+                    if start_ts >= end_ts:
+                        break
+                    # 主数据长度: 71 | BTC数据长度: 71
+# 合并后缺失值数量: 0
+# [NNStrategy] 收到新K线数据，时间: 70
+# [INPUT] 统一输入长度: 24根K线
+# [INPUT] 时间范围: 2025-07-22 17:00:00 ~ 2025-07-23 16:00:00
+# [INPUT] 最新K线时间: 2025-07-23 16:00:00
+# [INPUT] 最新K线: 192.73 192.74 187.91 188.28
+# [DEBUG] 信号概率（观望/做多/做空）: [1.13328555e-04 1.82985321e-01 8.16901326e-01]
+# signal_probs is ===>[1.13328555e-04 1.82985321e-01 8.16901326e-01]
+                    # 修改数据获取后的处理逻辑（约218行附近）
+                    btc_df = process_kline_data(btc_klines)
+                    btc_df = btc_df[:-1] if self.mode == 'live' else btc_df  # 实盘模式排除最新未闭合K线
+                    btc_df = btc_df[-200:]  # 保留最近200根K线
+                   # 合并数据并验证（关键修改）
+                    df = df.join(btc_df[['close']].rename(columns={'close':'btc_close'}), how='left')
+                    print("\n[数据合并验证]")
+                    print(f"主数据长度: {len(df)} | BTC数据长度: {len(btc_df)}")
+                    print(f"合并后缺失值数量: {df['btc_close'].isnull().sum()}")
+                    
                     # 更新策略数据（保持原有逻辑）
                     self.strategy.update_data(df)
                 
@@ -304,23 +343,22 @@ class TradingEngine:
         # 计算价格接近止损的程度
         # self.near_stop_loss = False
         # 检查持仓的止盈止损
-        if self.position != 0:
-            if self.position > 0:  # 多仓
-                if current_low <= self.stop_loss:
-                    self._close_position('做多止损', self.stop_loss, current_time)
-                    if self.max_added < 2:
-                        self.near_stop_loss = True
-                elif current_high >= self.take_profit:
-                    self._close_position('做多止盈', self.take_profit, current_time)
-            elif self.position < 0:  # 空仓
-                if current_high >= self.stop_loss:
-                    self._close_position('做空止损', self.stop_loss, current_time)
-                    if self.max_added < 2:
-                        self.near_stop_loss = True
-                elif current_low <= self.take_profit:
-                    print(f"current_low is ==>{current_low}, self.take_profit is ==>{self.take_profit}")
-                    self._close_position('做空止盈', self.take_profit, current_time)
- 
+        # if self.position != 0:
+        #     if self.position > 0:  # 多仓
+        #         if current_low <= self.stop_loss:
+        #             self._close_position('做多止损', self.stop_loss, current_time)
+        #             if self.max_added < 2:
+        #                 self.near_stop_loss = True
+        #         elif current_high >= self.take_profit:
+        #             self._close_position('做多止盈', self.take_profit, current_time)
+        #     elif self.position < 0:  # 空仓
+        #         if current_high >= self.stop_loss:
+        #             self._close_position('做空止损', self.stop_loss, current_time)
+        #             if self.max_added < 2:
+        #                 self.near_stop_loss = True
+        #         elif current_low <= self.take_profit:
+        #             print(f"current_low is ==>{current_low}, self.take_profit is ==>{self.take_profit}")
+        #             self._close_position('做空止盈', self.take_profit, current_time)
 
         # 在现有止盈止损检查前添加方向冲突平仓逻辑
         # # 处理新信号
@@ -340,6 +378,19 @@ class TradingEngine:
         #             self._close_position('做多超时平仓', current_price, current_time)
         #         else:
         #             self._close_position('做空超时平仓', current_price, current_time)
+        if signal_info['signal'] == '减仓':
+            if self.position > 0:
+                close_qty = abs(self.firstPosition) * 1
+                self._close_position('做多信号改变减仓', current_price, current_time, close_quantity=close_qty)  # 添加关键字参数
+                return 
+            elif self.position < 0:
+                close_qty = abs(self.firstPosition) * 1
+                self._close_position('做空信号改变减仓', current_price, current_time, close_quantity=close_qty)  # 添加关键字参数
+                return
+
+        # # 修改开仓逻辑（添加加仓类型）
+        # if '加仓' in signal_info['signal']:
+        #     self._close_position('风险加仓', current_price, current_time, close_qty)
 
         if self.position != 0:
             if self.position > 0 and signal_info['signal'] != '做多':
@@ -349,7 +400,7 @@ class TradingEngine:
     
         self.near_stop_loss  = False
         if signal_info['signal'] == '做多' and (self.position <= 0 or self.near_stop_loss):
-            entry_price = signal_info['price'] * (1 - 0.001)
+            entry_price = signal_info['price'] * (1 - 0)
             print(f"signal_info['price'] is ====>{signal_info['price']}")
             if is_price_valid(entry_price, '做多'):
                 self.holding_hours = signal_info.get('holding_time', 100)  # 从信号获取持仓时间
@@ -382,7 +433,7 @@ class TradingEngine:
                         timestamp=current_time
                     )
         elif signal_info['signal'] == '做空' and (self.position >= 0 or self.near_stop_loss):
-            entry_price = signal_info['price'] * (1 + 0.001)
+            entry_price = signal_info['price'] * (1 + 0)
             print(f"signal_info['price'] is ====>{signal_info['price']}")
             if is_price_valid(entry_price, '做空'):
                 self.take_profit = take_profit
@@ -432,9 +483,10 @@ class TradingEngine:
             '持仓时间(小时)': self.holding_hours  # 新增持仓时间记录
         })
         self.position = self.position + quantity
+        self.firstPosition = self.position
         self.entry_price = price
         self.max_added = self.max_added + 1
-    def _close_position(self, close_type, price, timestamp):
+    def _close_position(self, close_type, price, timestamp, close_quantity=None):
         """统一处理平仓逻辑"""
         print(f"\n=== 平仓操作 ===")
         print(f"时间: {timestamp.strftime('%Y-%m-%d %H:%M')}")
@@ -444,9 +496,9 @@ class TradingEngine:
         holding_hours = (timestamp - self.entry_time).total_seconds() / 3600 if self.entry_time else 0
         # 当前使用策略最新价格，应区分平仓类型
         close_price = price
-        if '信号改变' in close_type:
+        if '信号改变' in close_type or '减仓' in close_type:
             close_price = self.strategy.data['close'].iloc[-1]  # 使用下根K线开盘价
-        close_quantity = abs(self.position)
+        close_quantity = abs(self.position) if close_quantity is None else min(abs(self.position), abs(close_quantity))
         fee = close_quantity * close_price * 0.0002
         proceeds = close_quantity * close_price - fee
         
@@ -461,7 +513,7 @@ class TradingEngine:
             '持仓时间(小时)': round(holding_hours, 2)  # 新增实际持仓时间
         })
         self.near_stop_loss = False
-        self.position = 0
+        self.position = self.position - (close_quantity if self.position > 0 else -close_quantity)
         self.capital += proceeds
         self.total_profit += self.trades[-1]['收益']
         self.max_added = self.max_added - 1
@@ -535,7 +587,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (4500) / price
+            quantity = (7500) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()

@@ -102,7 +102,7 @@ def main():
     
     if args.mode == 'backtest':
         # 回测配置
-        end_date = '2025-05-01'
+        end_date = '2024-01-01'
         start_date = '2025-08-01'
         
         print(f"Starting backtest for {args.symbol} from {start_date} to {end_date}")
@@ -123,10 +123,10 @@ def main():
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\nStopping trading...")
-            engine.stop()
+            engine.stop()       
 
     elif args.mode == 'quick_backtest':  # 新增模式7
-        start_date = datetime(2025, 6, 1)  # 可改为参数化
+        start_date = datetime(2025, 3, 1)  # 可改为参数化
         end_date = datetime(2025, 8, 1)
         
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
