@@ -28,6 +28,7 @@ def process_kline_data(klines):
     numeric_cols = ['open', 'high', 'low', 'close', 'volume']
     df[numeric_cols] = df[numeric_cols].astype(float)
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df.set_index('timestamp')
     return calculate_shadow_indicators(df)
     
 class TradingEngine:
@@ -269,7 +270,20 @@ class TradingEngine:
                     print("\n[数据合并验证]")
                     print(f"主数据长度: {len(df)} | BTC数据长度: {len(btc_df)}")
                     print(f"合并后缺失值数量: {df['btc_close'].isnull().sum()}")
-                    
+                    # 新增时间戳验证逻辑
+                    valid_timestamp = (
+                        not df.empty 
+                        and not btc_df.empty 
+                        and df.index[0] == btc_df.index[0] 
+                        and df.index[-1] == btc_df.index[-1]
+                    )
+                    print(f"主数据首尾时间: {df.index[0]} - {df.index[-1]}")
+                    print(f"BTC数据首尾时间: {btc_df.index[0]} - {btc_df.index[-1]}")
+                    if not valid_timestamp:
+                        self.logger.error("BTC数据与主数据时间戳不匹配，重新获取数据")
+                        klines = []  # 清空已获取数据
+                        btc_klines = []
+                        continue  # 跳过后续处理，重新获取数据
                     # 更新策略数据（保持原有逻辑）
                     self.strategy.update_data(df)
                 
@@ -587,7 +601,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (7500) / price
+            quantity = (10500) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()

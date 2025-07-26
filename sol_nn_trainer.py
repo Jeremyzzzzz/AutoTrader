@@ -71,6 +71,10 @@ class SOLTrainer:
         self.batch_size = config.get('batch_size', 64)
         self.seq_length = config.get('seq_length', 24)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.best_return = -np.inf  # 新增最佳收益率跟踪
+        self.best_loss = np.inf     # 新增最佳损失跟踪
+        self.model_version = 1  # 新增模型版本跟踪
+        self.existing_model = config.get('existing_model')  # 新增已有模型路径参数
 
     def _calculate_metrics(self, returns, processed_df):
         """计算风险管理指标（修复版）"""
@@ -123,7 +127,7 @@ class SOLTrainer:
     def create_sequences(self, data, labels):
         xs, ys = [], []
         # 修改1：调整时间窗口为4小时（原72改为4+24）
-        predict_time = 5
+        predict_time = 4
         for i in range(len(data)-self.seq_length- 24 - predict_time):  # 4+24=28
             # 修改2：预测4小时后的信号
             if labels[i+predict_time][0] in [1, 2]:  # 原i+self.seq_length改为i+4
@@ -138,183 +142,156 @@ class SOLTrainer:
         return np.array(xs), np.array(ys)
 
     def train(self, symbol='SOL_USDT_USDT', epochs=50):
-        # 加载数据
+ 
+        best_return = -np.inf
+        best_loss = np.inf
         raw_data = self.data_adapter.load_data(
             symbol=symbol,
             timeframe=self.timeframe,
             start=datetime.datetime(2020, 1, 1),
             end=datetime.datetime(2025, 3, 1),
-            btc_symbol='BTC_USDT_USDT'  # 新增BTC数据参数
+            btc_symbol='BTC_USDT_USDT'
         )
-        # 使用统一特征工程（先生成原始特征）
         processed_df = prepare_features(raw_data)
         
-        # 定义特征列（必须与feature_utils完全一致）
-        feature_columns = get_feature_columns()  # 使用统一接口
+        # 特征工程
+        feature_columns = get_feature_columns()
         self.scaler = StandardScaler()
         features = self.scaler.fit_transform(processed_df[feature_columns])
+        labels = processed_df[['signal', 'stop_loss', 'take_profit']].values
         
-        # 标签列
-        label_columns = ['signal', 'stop_loss', 'take_profit']
-        
-        # 标准化处理
-        labels = processed_df[label_columns].values
-        
-        # 创建时间序列样本
+        # 创建序列数据
         X, y = self.create_sequences(features, labels)
-        
-        # 数据集分割
         split = int(0.8 * len(X))
         train_data = SOLDataset(X[:split], y[:split])
         val_data = SOLDataset(X[split:], y[split:])
-        
-        # 创建数据加载器
+        # 加载数据
         train_loader = DataLoader(train_data, batch_size=self.batch_size, shuffle=True)
         val_loader = DataLoader(val_data, batch_size=self.batch_size)
-
-        # 初始化模型
-        model = EnhancedSOLModel(len(feature_columns)).to(self.device)
+         # 初始化模型和优化器
+        if self.existing_model:
+            print(f"正在加载已有模型进行增量训练: {self.existing_model}")
+            # 扩展安全加载白名单
+            import numpy
+            from torch.serialization import add_safe_globals
+            add_safe_globals([
+                numpy._core.multiarray.scalar,
+                numpy.dtype,  # 新增dtype支持
+                numpy.ndarray
+            ])
+            
+            checkpoint = torch.load(
+                self.existing_model, 
+                weights_only=True,
+                mmap=True
+            )
+            model = EnhancedSOLModel(**checkpoint['config']).to(self.device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            self.scaler.mean_ = np.array(checkpoint['scaler_mean'])
+            self.scaler.scale_ = np.array(checkpoint['scaler_scale'])
+            self.best_return = checkpoint['training_metrics']['best_return']
+            self.best_loss = checkpoint['training_metrics']['best_loss']
+            self.model_version = checkpoint.get('model_version', 1) + 1
+        else:
+            model = EnhancedSOLModel(len(feature_columns)).to(self.device)
         optimizer = optim.AdamW(model.parameters(), lr=0.001)
-        
-        # 多任务损失函数
         signal_criterion = nn.CrossEntropyLoss()
         price_criterion = nn.HuberLoss()
-    
-        # === 新增特征重要性分析 ===tt
-        # # 使用随机森林进行初步特征筛选
-        # rf = RandomForestClassifier(n_estimators=100)
-        # rf.fit(features, processed_df['signal'])
-        
-        # # 可视化特征重要性
-        # importances = rf.feature_importances_
-        # indices = np.argsort(importances)[::-1]
-        
-        # plt.figure(figsize=(12, 8))
-        # plt.title("Feature Importances")
-        # plt.bar(range(len(indices)), importances[indices], align='center')
-        # plt.xticks(range(len(indices)), np.array(feature_columns)[indices], rotation=90)
-        # plt.tight_layout()
-        # plt.savefig('feature_importance.png')
-        # plt.close()
-    
-        # 训练循环
-        current_sharpe = 0.0
-        current_dd = 1.0
-        max_sharpe = -1000
-        min_max_dd = 2000
 
+        # 训练循环
         for epoch in range(epochs):
             model.train()
             total_loss, total_signal_loss, total_price_loss = 0, 0, 0
+            
+            # 训练阶段
             for inputs, targets in tqdm(train_loader, desc=f'Epoch {epoch+1}'):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 optimizer.zero_grad()
                 
                 outputs = model(inputs)
-                
-                # 分解损失
                 signal_loss = signal_criterion(outputs[:, :3], targets[:, 0].long())
                 price_loss = price_criterion(outputs[:, 3:], targets[:, 1:])
                 loss = signal_loss + price_loss
                 
                 loss.backward()
-                
-                # 添加梯度监控
-                grad_norms = [p.grad.data.norm(2).item() for p in model.parameters() if p.grad is not None]
-                avg_grad_norm = np.mean(grad_norms) if grad_norms else 0
-                
                 optimizer.step()
+                
                 total_loss += loss.item()
                 total_signal_loss += signal_loss.item()
                 total_price_loss += price_loss.item()
 
-            # 训练集统计
+            # 计算平均损失
             avg_loss = total_loss / len(train_loader)
             avg_signal_loss = total_signal_loss / len(train_loader)
             avg_price_loss = total_price_loss / len(train_loader)
             
-            print(f"\n[训练统计] Epoch {epoch+1}")
-            print(f"总损失: {avg_loss:.4f} | 信号损失: {avg_signal_loss:.4f} | 价格损失: {avg_price_loss:.4f}")
-            print(f"平均梯度范数: {avg_grad_norm:.4f}")
-
-            # 验证集评估
+            # 验证阶段
             model.eval()
+            val_returns = []
+            signal_dist = {0:0, 1:0, 2:0}
             with torch.no_grad():
-                val_returns = []
-                signal_dist = {0:0, 1:0, 2:0}  # 信号分布统计
                 for inputs, targets in val_loader:
                     inputs, targets = inputs.to(self.device), targets.to(self.device)
                     outputs = model(inputs)
                     
-                    # 收集预测信号分布
+                    # 计算收益率
                     signals = torch.argmax(outputs[:, :3], dim=1)
-                    for s in signals.cpu().numpy():
-                        signal_dist[s] += 1
+                    entry_prices = inputs[:, -1, 3]
                     
-                    # 收集预测收益率（调整为实际模拟收益）
-                    entry_prices = inputs[:, -1, 3]  # 使用收盘价作为入场价
-                    # 应改为基于实际信号方向计算
-                    signals = torch.argmax(outputs[:, :3], dim=1)
                     long_mask = (signals == 1)
                     short_mask = (signals == 2)
-
-                    # 做多收益计算
-                    long_returns = (outputs[long_mask, 3] - entry_prices[long_mask]) / entry_prices[long_mask]
-                    # 做空收益计算
-                    short_returns = (entry_prices[short_mask] - outputs[short_mask, 4]) / entry_prices[short_mask]
-
-                    val_returns = torch.cat([long_returns, short_returns]).cpu().numpy()
-                
-                # 计算验证集统计
-                val_returns = np.array(val_returns)
-                mean_return = np.mean(val_returns)
-                std_return = np.std(val_returns)
-                
-                print("\n[验证统计]")
-                print(f"信号分布 - 空仓: {signal_dist[0]} | 做多: {signal_dist[1]} | 做空: {signal_dist[2]}")
-                print(f"平均收益率: {mean_return:.4%} | 收益波动率: {std_return:.4%}")
-
-            # 验证集评估
-            model.eval()
-            with torch.no_grad():
-                val_returns = []
-                for inputs, targets in val_loader:
-                    inputs, targets = inputs.to(self.device), targets.to(self.device)
-                    outputs = model(inputs)
                     
-                    # 收集预测收益率
-                    val_returns.extend(outputs.view(-1).cpu().numpy())
-                
-            # 计算风险管理指标
-            val_returns = np.array(val_returns)
-            current_sharpe, current_dd = self._calculate_metrics(val_returns, processed_df)
-            print(f"current_sharpe: {current_sharpe}, current_dd: {current_dd}")
-            if current_sharpe > max_sharpe:
-                max_sharpe = current_sharpe
-            if current_dd < min_max_dd:
-                min_max_dd = current_dd
-            
-            print(f'Epoch {epoch+1} | Train Loss: {total_loss/len(train_loader):.4f} | max_sharpe: {max_sharpe:.4f} | min_max_dd: {min_max_dd:.4f}'  )
+                    long_returns = (outputs[long_mask, 3] - entry_prices[long_mask]) / entry_prices[long_mask]
+                    short_returns = (entry_prices[short_mask] - outputs[short_mask, 4]) / entry_prices[short_mask]
+                    
+                    batch_returns = torch.cat([long_returns, short_returns]).cpu().numpy()
+                    val_returns.extend(batch_returns)
+                    
+                    # 统计信号分布
+                    for s in signals.cpu().numpy():
+                        signal_dist[s] += 1
 
-        # 保存完整模型
-        model_dir = r'model'
-        os.makedirs(model_dir, exist_ok=True)
-        model_path = os.path.join(model_dir, f"{symbol}_nn_model.pth")
-        
-        torch.save({
-            'model_state_dict': model.state_dict(),
-            'scaler_mean': self.scaler.mean_.tolist(),
-            'scaler_scale': self.scaler.scale_.tolist(),
-            'training_metrics': {
-                'best_sharpe': max_sharpe,
-                'best_drawdown': min_max_dd,
-                'final_returns': val_returns.tolist()
-            },
-            'config': {
-                'input_size': X.shape[2],
-                'seq_length': self.seq_length
-            }
-        }, model_path)
+            # 计算验证指标
+            mean_return = np.mean(val_returns) if len(val_returns) > 0 else 0.0
+            current_return = mean_return
+            current_loss = avg_loss
+            
+           # 修改模型保存逻辑（在原有保存代码处修改）
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M")
+            best_return = current_return
+            best_loss = current_loss
+            
+            model_dir = r'model'
+            os.makedirs(model_dir, exist_ok=True)
+            self.best_model_path = os.path.join(model_dir, f"{symbol}_best_nn_model.pth")
+            
+            # 在torch.save的字典中添加版本信息
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'scaler_mean': self.scaler.mean_.tolist(),
+                'scaler_scale': self.scaler.scale_.tolist(),
+                'training_metrics': {
+                    'best_return': best_return,
+                    'best_loss': best_loss,
+                    'final_returns': val_returns
+                },
+                'config': {
+                    'input_size': X.shape[2],
+                    'seq_length': self.seq_length
+                },
+                'model_version': self.model_version  # 新增版本号
+            }, self.best_model_path)
+
+            # 打印训练日志
+            print(f"\n[Epoch {epoch+1}/{epochs}]")
+            print(f"训练损失: {avg_loss:.4f} | 信号损失: {avg_signal_loss:.4f} | 价格损失: {avg_price_loss:.4f}")
+            print(f"验证平均收益率: {mean_return:.4%}")
+            print(f"信号分布 - 空仓: {signal_dist[0]} | 做多: {signal_dist[1]} | 做空: {signal_dist[2]}")
+
+        # 最终保存
+        print(f"\n训练完成，最佳模型已保存至: {self.best_model_path}")
+        print(f"最佳平均收益率: {best_return:.4%}")
+        print(f"对应最低训练损失: {best_loss:.4f}")
 
 if __name__ == "__main__":
     # 加载配置文件
@@ -328,7 +305,8 @@ if __name__ == "__main__":
         'data_path': config['data_path'],
         'timeframe': '1h',
         'batch_size': 128,
-        'seq_length': 24
+        'seq_length': 24,
+        'existing_model': config.get('existing_model')
     })
     
     # 遍历所有币种进行训练
