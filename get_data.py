@@ -109,7 +109,7 @@ def main():
     end_date = datetime.now().strftime('%Y-%m-%d')
     
     # 创建主目录
-    base_dir = 'SOL回测结果训练集'
+    base_dir = '回测结果训练集'
     os.makedirs(base_dir, exist_ok=True)
     
     # 获取所有USDT永续合约
@@ -124,7 +124,7 @@ def main():
     # 遍历所有永续合约
     for market in perpetual_markets:
         symbol_ccxt = market['symbol']
-        if symbol_ccxt not in ["SOL/USDT:USDT"]:
+        if symbol_ccxt not in ["BTC/USDT:USDT"]:
             continue
         exchange_symbol = market['id']
         # 清理非法字符并标准化文件名
@@ -138,7 +138,7 @@ def main():
         
         try:
             # 定义需要获取的时间框架
-            timeframes = ['1h', '4h', '30m', '15m', '5m']
+            timeframes = ['1h']
             
             # 获取K线数据
             for tf in timeframes:

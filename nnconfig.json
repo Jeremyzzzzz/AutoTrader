@@ -2,7 +2,7 @@
     "model_train": {
         "symbols": ["SOL_USDT_USDT"],
         "timeframe": "1h",
-        "data_path": "回测数据训练集",
+        "data_path": "回测结果训练集",
         "epochs": 20,
         "batch_size": 64,
         "seq_length": 24,

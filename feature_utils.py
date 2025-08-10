@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
+import datetime
+import json
 plt.rcParams['font.sans-serif'] = ['SimHei']  # 设置中文字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 def calculate_rsi(series, period=14):
@@ -115,6 +118,9 @@ def is_filter_data(high, low, close, open):
     return True
 def prepare_features(data):
     df = data.copy()
+    # 新增基础校验
+    if len(df) != 24:
+        raise ValueError(f"特征计算只能24根K线，当前只有{len(df)}根")
     df.index = pd.to_datetime(df.index)
     
     # === 新增模式过滤器 ===
@@ -194,4 +200,45 @@ def prepare_features(data):
     # plt.savefig('feature_correlation.png')
     # plt.close()/做多/做空）: [6.1025112e-06 2.7324775e-01 7.2674614e-01]
     # 最终返回时保留有效样本
-    return df[df['valid_mask']][get_feature_columns()].dropna()
+
+    RECORD_TIME = '2025-03-10 15:00:00'
+    if pd.to_datetime(RECORD_TIME) in df.index:
+        debug_data = df.loc[[RECORD_TIME], get_feature_columns()].copy()
+        debug_data['record_time'] = RECORD_TIME
+        
+        # === 修改移动平均计算明细记录方式 ===
+        # 获取MA24计算窗口时间范围
+        ma24_window = df['close'].shift(1).iloc[:24].dropna()
+        debug_data['ma24_calculation'] = json.dumps({
+            'window_size': len(ma24_window),
+            'begin_time': str(ma24_window.index[0]),
+            'end_time': str(ma24_window.index[-1])
+        })
+        
+        # 获取MA72计算窗口时间范围
+        ma72_window = df['close'].shift(1).iloc[:72].dropna()
+        debug_data['ma72_calculation'] = json.dumps({
+            'window_size': len(ma72_window),
+            'begin_time': str(ma72_window.index[0]),
+            'end_time': str(ma72_window.index[-1])
+        })
+        log_path = "fixed_feature_debug.csv"
+        if os.path.exists(log_path):
+            existing = pd.read_csv(log_path)
+            if RECORD_TIME not in existing['record_time'].values:
+                debug_data.to_csv(log_path, mode='a', header=False, index=False)
+        else:
+            debug_data.to_csv(log_path, index=False)
+
+    result_df = df[df['valid_mask']][get_feature_columns()].dropna()
+    
+    # # === 新增特征日志 ===
+    # log_dir = "logs/"
+    # os.makedirs(log_dir, exist_ok=True)
+    # log_file = f"{log_dir}/feature_log_{datetime.datetime.now().strftime('%Y%m%d')}.csv"
+    
+    # # 添加索引到日志数据
+    # log_df = result_df.reset_index()
+    # log_df.to_csv(log_file, mode='a', header=not os.path.exists(log_file), index=False)
+    
+    return result_df

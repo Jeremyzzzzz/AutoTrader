@@ -4,7 +4,6 @@ from strategy import BaseStrategy
 from data_adapter import DataAdapter
 from sklearn.preprocessing import StandardScaler
 from sol_nn_trainer import EnhancedSOLModel
-from sol_nn_alarm_trainer import RiskAlertModel
 from feature_utils import prepare_features, calculate_rsi, calculate_atr, get_feature_columns, is_filter_data
 import pandas as pd
 import torch.nn.functional as F
@@ -30,7 +29,7 @@ class NNStrategy(BaseStrategy):
         self.trade_threshold = 0.015  # 1.5% 阈值
         self.stop_loss_pct = 0.015    # 1.5% 止损
         self.take_profit_pct = 0.02   # 2% 止盈
-        
+        self.last_blocked_signal = None
         # 初始化数据适配器
         self.data_adapter = data_adapter
         # 初始化日志路径
@@ -38,6 +37,16 @@ class NNStrategy(BaseStrategy):
         os.makedirs(self.log_dir, exist_ok=True)
         self.log_file = os.path.join(self.log_dir, f"nn_signals_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx")
         self.lastSignal = None
+        self.alert_model = self._load_alert_model()  # 新增预警模型加载
+        self.btc_symbol = config.get('btc_symbol', 'BTC_USDT_USDT')  # 新增BTC交易对
+        self.processed_df = None
+
+    def _load_alert_model(self):
+        """加载训练好的风险预警模型"""
+        import joblib
+        base_symbol = self.symbol.split('_')[0]
+        model_path = os.path.join('model', f"SOL_USDT_USDT_alert_model.pkl")
+        return joblib.load(model_path)
 
     def _log_signal(self, signal_probs, kline_data):
         """记录信号日志"""
@@ -86,6 +95,7 @@ class NNStrategy(BaseStrategy):
         # 添加维度校验
         if processed_df.shape[1] != len(feature_columns):
             raise ValueError(f"特征维度不匹配！预期 {len(feature_columns)} 维，实际 {processed_df.shape[1]} 维")
+        self.processed_df = processed_df
         
         # 标准化时仅使用特征列
         scaled_data = self.scaler.transform(processed_df[feature_columns].values)
@@ -193,9 +203,9 @@ class NNStrategy(BaseStrategy):
         self.risk_scaler.scale_ = checkpoint['scaler_scale']
         
         feature_columns = get_feature_columns()
-        self.risk_model = RiskAlertModel(len(feature_columns))
-        self.risk_model.load_state_dict(checkpoint['model_state_dict'])
-        self.risk_model.eval()
+        # self.risk_model = RiskAlertModel(len(feature_columns))
+        # self.risk_model.load_state_dict(checkpoint['model_state_dict'])
+        # self.risk_model.eval()
 
     # def _risk_check(self, signal_type, entry_price, cached_data):
     #     """使用神经网络进行风险预测"""
@@ -220,28 +230,28 @@ class NNStrategy(BaseStrategy):
     #     return risk_prob > 0.95  # 示例阈值
     # 生成交易信号前添加风险检查
 
-    def _risk_check(self, signal_type, entry_price, cached_data):
-        """风险控制过滤器"""
-        # 1. 波动率检查（过去24小时ATR）
-        atr_4h = self._calculate_atr(cached_data[-24:], period=8).iloc[-1]
-        current_range = cached_data['high'].iloc[-1] - cached_data['low'].iloc[-1]
+    # def _risk_check(self, signal_type, entry_price, cached_data):
+    #     """风险控制过滤器"""
+    #     # 1. 波动率检查（过去24小时ATR）
+    #     atr_4h = self._calculate_atr(cached_data[-24:], period=8).iloc[-1]
+    #     current_range = cached_data['high'].iloc[-1] - cached_data['low'].iloc[-1]
         
-        # 2. 趋势强度检查（72周期EMA斜率）
-        ma72 = cached_data['close'].rolling(72).mean()
-        ma72_slope = (ma72.iloc[-1] - ma72.iloc[-6]) / 5  # 最近5根K线斜率
+    #     # 2. 趋势强度检查（72周期EMA斜率）
+    #     ma72 = cached_data['close'].rolling(72).mean()
+    #     ma72_slope = (ma72.iloc[-1] - ma72.iloc[-6]) / 5  # 最近5根K线斜率
         
-        # 3. 短期超买超卖检查（6小时RSI）
-        rsi_6h = calculate_rsi(cached_data['close'], period=6).iloc[-1]
+    #     # 3. 短期超买超卖检查（6小时RSI）
+    #     rsi_6h = calculate_rsi(cached_data['close'], period=6).iloc[-1]
         
-        # 风险规则（可根据需要调整参数）
-        risk_conditions = [
-            current_range > atr_4h * 1.5,          # 当前波动超过平均波动1.5倍
-            abs(ma72_slope) < 0.0005,               # 中期趋势不明朗
-            (signal_type == '做多' and rsi_6h > 70) or 
-            (signal_type == '做空' and rsi_6h < 30) # 短期超买超卖
-        ]
+    #     # 风险规则（可根据需要调整参数）
+    #     risk_conditions = [
+    #         current_range > atr_4h * 1.5,          # 当前波动超过平均波动1.5倍
+    #         abs(ma72_slope) < 0.0005,               # 中期趋势不明朗
+    #         (signal_type == '做多' and rsi_6h > 70) or 
+    #         (signal_type == '做空' and rsi_6h < 30) # 短期超买超卖
+    #     ]
         
-        return any(risk_conditions)
+    #     return any(risk_conditions)
 
     def on_bar(self, data):
         """接收最新行情数据并生成交易信号"""
@@ -325,27 +335,72 @@ class NNStrategy(BaseStrategy):
                     signal_idx = np.argmax(signal_probs)
             print(f"[DEBUG] 预测信号索引: {signal_idx}")
             entry_price = data['close'].iloc[-1]
-            
-            # #  # 在返回信号前添加风险检查
-            # if signal_idx in [1, 2]:
-            #     signal_type = '做多' if signal_idx == 1 else '做空'
-            #     if self._risk_check(signal_type, entry_price, self.cached_data):
-            #         print(f"[RISK] 风险控制触发 {signal_type} 减仓 | 当前价格:{entry_price:.4f}")
-            #         if signal_type == '做多':
-            #             if self.lastSignal != None and self.lastSignal == '做多':
-            #                 return '减仓', 0.5, (  # 仓位系数改为0.25
-            #                     entry_price * (1 + take_profit * 10),
-            #                     entry_price * (1 - stop_loss * 10),
-            #                     100
-            #                 )
-            #         if signal_type == '做空':
-            #             if self.lastSignal != None and self.lastSignal == '做空':
-            #                 return '减仓', 0.5, (  # 仓位系数改为0.25
-            #                     entry_price * (1 + take_profit * 10),
-            #                     entry_price * (1 - stop_loss * 10),
-            #                     100
-            #                 )
-                    # return 'HOLD', 0, (0, 0, 100)
+            # 新增信号方向检查
+            current_signal = None
+            if signal_idx == 1:
+                current_signal = '做多'
+            elif signal_idx == 2:
+                current_signal = '做空'
+                
+            # 检查是否需要保持阻止状态
+            if self.last_blocked_signal and current_signal == self.last_blocked_signal:
+                print(f"[ALERT] 保持阻止 {current_signal} 信号")
+                return 'HOLD', 0, (0, 0, 100)
+            if signal_idx in [1, 2]:
+                current_features = self.processed_df.iloc[-1][get_feature_columns()].copy()
+                print(f"[特征校验] 输入数据长度: {len(self.processed_df)}")
+                print(f"MA24样本值: {self.processed_df['ma24'].iloc[-5:].values}")
+                class_idx = {label: idx for idx, label in enumerate(self.alert_model.classes_)}
+                prob = self.alert_model.predict_proba([current_features])[0][class_idx[1]]
+                suggestion = '允许交易' if prob < 0.65 else '建议观望'
+                print(f"[RISK] {'做多' if signal_idx ==1 else '做空'}风险概率: {prob:.2%}")
+                
+                if suggestion == '建议观望':
+                    # # 新增特征记录（添加风险概率）
+                    # feature_record = pd.DataFrame([current_features])
+                    # feature_record['timestamp'] = data.index[-1]  # 添加时间戳
+                    # feature_record['风险概率'] = prob  # 新增概率字段
+                    
+                    # risk_feature_path = os.path.join(self.log_dir, "risk_features.csv")
+                    
+                    # # 写入CSV文件（追加模式）
+                    # if not os.path.exists(risk_feature_path):
+                    #     feature_record.to_csv(risk_feature_path, index=False)
+                    # else:
+                    #     feature_record.to_csv(risk_feature_path, mode='a', header=False, index=False)
+
+                    # # 记录抑制事件（保持原有逻辑不变）
+                    # suppression_record = pd.DataFrame([{
+                    #     'timestamp': data.index[-1].strftime('%Y-%m-%d %H:%M:%S'),
+                    #     '信号类型': current_signal,
+                    #     '风险概率': f"{prob:.2%}",
+                    #     '建议操作': suggestion,
+                    #     '开仓价格': entry_price,
+                    #     '当前价格': data['close'].iloc[-1]
+                    # }])
+                    
+                    # # 保存到独立日志文件（修复追加模式）
+                    # suppression_log = os.path.join(self.log_dir, "suppression_records.xlsx")
+                    
+                    # # 使用with语句确保文件正确关闭
+                    # with pd.ExcelWriter(
+                    #     suppression_log,
+                    #     mode='a' if os.path.exists(suppression_log) else 'w',
+                    #     engine='openpyxl',
+                    #     if_sheet_exists='overlay'
+                    # ) as writer:
+                    #     suppression_record.to_excel(
+                    #         writer,
+                    #         index=False,
+                    #         header=not writer.sheets['Sheet1'].max_row > 0,
+                    #         startrow=writer.sheets['Sheet1'].max_row
+                    #     )
+
+                    # # 新增屏蔽时间打印
+                    self.last_blocked_signal = current_signal
+                    return 'HOLD', 0, (0, 0, 100)
+                else:
+                    self.last_blocked_signal = None  # 重置阻止状态
             
             # 生成交易信号（保持原有逻辑）
             if signal_idx == 1:  # 做多

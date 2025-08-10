@@ -127,7 +127,7 @@ def main():
 
     elif args.mode == 'quick_backtest':  # 新增模式7
         start_date = datetime(2025, 3, 1)  # 可改为参数化
-        end_date = datetime(2025, 8, 1)
+        end_date = datetime(2025, 9, 1)
         
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
         report = engine.run_quick_backtest(start_date, end_date)
