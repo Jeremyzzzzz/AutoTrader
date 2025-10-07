@@ -97,7 +97,6 @@ class TradingEngine:
     def _run_backtest_core(self, data, start_date, end_date):
         """复用回测核心逻辑"""
         print(f"Starting realtime backtest from {start_date} to {end_date}")
-        
         # 清空历史记录
         self.positions = []
         self.trades = []
@@ -601,7 +600,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (10500) / price
+            quantity = (1400) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()

@@ -588,23 +588,41 @@ class SOLTrainer:
         print(f"预测分布: 做多 {val_pred_dist[1]} | 做空 {val_pred_dist[0]}")
         return returns
 
-    def train(self, symbol='SOL_USDT_USDT', epochs=50, is_save=True):
+    def train(self, symbol='SOL_USDT_USDT', epochs=50, is_save=True, save_epoch_range=0):
         if is_save:
             self.prepare_and_save_features(symbol)
         model = self.train_model(symbol, epochs)
-        # returns = self.validate_model(symbol, model)
         
         model_dir = "model"
         os.makedirs(model_dir, exist_ok=True)
-        checkpoint = {
-            'model_state_dict': model.state_dict(),
-            'scaler_mean': self.scaler.mean_,  # 新增
-            'scaler_scale': self.scaler.scale_  # 新增
-        }
         
-        model_path = os.path.join(model_dir, f"{symbol}_nn_model.pth")
-        torch.save(checkpoint, model_path)  # 修改保存内容
-        print(f"\n模型已保存至: {model_path}")
+        # 最终模型保存
+        final_model_path = os.path.join(model_dir, f"{symbol}_nn_model.pth")
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'scaler_mean': self.scaler.mean_,
+            'scaler_scale': self.scaler.scale_,
+            'trained_epochs': epochs  # 记录总训练轮数
+        }, final_model_path)
+        
+        # 新增指定范围保存逻辑
+        if save_epoch_range > 0:
+            start_epoch = max(0, epochs - save_epoch_range)
+            print(f"\n正在保存指定范围模型: Epoch {start_epoch+1}-{epochs}")
+            
+            # 直接保存最后N个epoch的模型
+            for epoch_num in range(start_epoch, epochs):
+                model_path = os.path.join(
+                    model_dir, 
+                    f"{symbol}_nn_model_{epoch_num+1:03d}.pth"  # 使用三位数补齐
+                )
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'scaler_mean': self.scaler.mean_,
+                    'scaler_scale': self.scaler.scale_,
+                    'epoch': epoch_num+1
+                }, model_path)
+                print(f"模型已保存: {model_path}")
 
         # 生成标签逻辑
     def generate_labels(self, symbol):
@@ -658,7 +676,7 @@ if __name__ == "__main__":
             print(f"{'='*40}")
             
             # 训练并保存模型
-            trainer.train(symbol=symbol, epochs=config.get('epochs', 50), is_save=True)
+            trainer.train(symbol=symbol, epochs=config.get('epochs', 50), is_save=True, save_epoch_range=config.get('save_epoch_range', 0))
             
             
             # 移动到下一个时间窗口

@@ -3,10 +3,23 @@
         "symbols": ["SOL_USDT_USDT"],
         "timeframe": "1h",
         "data_path": "回测结果训练集",
-        "epochs": 20,
-        "batch_size": 64,
+        "epochs": 80,
+        "batch_size" : 256,
         "seq_length": 24,
         "atr_period": 14,
-        "rsi_period": 14
+        "rsi_period": 14,
+        "cv_config": {
+            "num_folds": 1,
+            "train_window_months": 48,
+            "val_window_months": 3,
+            "step_months": 1,
+            "initial_train_start": "2020-01-01",
+            "initial_train_end": "2025-05-01",
+            "initial_val_start": "2025-05-01",
+            "initial_val_end": "2025-09-01"
+        },
+        "early_stop_patience": 50,
+        "save_epoch_range": 20,
+        "noise_filter_level": "high"
     }
 }
