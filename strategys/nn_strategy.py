@@ -4,7 +4,7 @@ from strategy import BaseStrategy
 from data_adapter import DataAdapter
 from sklearn.preprocessing import StandardScaler
 from sol_nn_trainer import EnhancedSOLModel
-from feature_utils import prepare_features, calculate_rsi, calculate_atr, get_feature_columns, is_filter_data
+from feature_utils import prepare_features, calculate_rsi, calculate_atr, get_feature_columns
 import pandas as pd
 import torch.nn.functional as F
 import datetime
@@ -21,7 +21,7 @@ class NNStrategy(BaseStrategy):
         ])
         self.model = None
         self.scaler = None
-        self.seq_length = 72
+        self.seq_length = 24
         print(f"[NNStrategy] 初始化策略，使用数据路径: {config.get('data_path')}")
         self._load_model()
         # self._load_risk_model() 
@@ -37,9 +37,10 @@ class NNStrategy(BaseStrategy):
         os.makedirs(self.log_dir, exist_ok=True)
         self.log_file = os.path.join(self.log_dir, f"nn_signals_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx")
         self.lastSignal = None
-        self.alert_model = self._load_alert_model()  # 新增预警模型加载
+        # self.alert_model = self._load_alert_model()  # 新增预警模型加载
         self.btc_symbol = config.get('btc_symbol', 'BTC_USDT_USDT')  # 新增BTC交易对
         self.processed_df = None
+        self.future_window = 4  # 与训练器保持一致
 
     def _load_alert_model(self):
         """加载训练好的风险预警模型"""
@@ -48,9 +49,8 @@ class NNStrategy(BaseStrategy):
         model_path = os.path.join('model', f"SOL_USDT_USDT_alert_model.pkl")
         return joblib.load(model_path)
 
-    def _log_signal(self, signal_probs, kline_data):
+    def _log_signal(self, prob_long, prob_short, kline_data):
         """记录信号日志"""
-        # 获取K线时间戳（使用结束时间）
         timestamp = kline_data.name.strftime('%Y-%m-%d %H:%M:%S')
         
         log_entry = {
@@ -60,26 +60,21 @@ class NNStrategy(BaseStrategy):
         'low': kline_data['low'],
         'close': kline_data['close'],
         'volume': kline_data['volume'],
-        'prob_hold': signal_probs[0],
-        'prob_long': signal_probs[1], 
-        'prob_short': signal_probs[2]
+        'prob_long': prob_long,  # 做多概率
+        'prob_short': prob_short  # 做空概率
         }
     
-        # 新增写入逻辑
         df = pd.DataFrame([log_entry])
         
-        # 如果文件不存在，创建新文件并写入header
         if not os.path.exists(self.log_file):
             df.to_excel(self.log_file, index=False, engine='openpyxl')
         else:
-            # 追加模式写入（保留历史记录）
             with pd.ExcelWriter(
                 self.log_file,
                 engine='openpyxl',
                 mode='a',
                 if_sheet_exists='overlay'
             ) as writer:
-                # 找到最后一行并追加数据
                 df.to_excel(
                     writer, 
                     index=False,
@@ -88,16 +83,24 @@ class NNStrategy(BaseStrategy):
                 )
 
     def _prepare_features(self, data):
-
-        processed_df = prepare_features(data)
-        feature_columns = get_feature_columns()  # 使用统一获取特征列的方法
+        # 记录原始数据信息
+        print(f"[特征准备] 输入数据形状: {data.shape}, 时间范围: {data.index.min()} - {data.index.max()}")
+        valid_data = data.iloc[:-self.future_window] if len(data) > self.future_window else data
+        processed_df = prepare_features(valid_data)
+        feature_columns = get_feature_columns()
         
-        # 添加维度校验
-        if processed_df.shape[1] != len(feature_columns):
-            raise ValueError(f"特征维度不匹配！预期 {len(feature_columns)} 维，实际 {processed_df.shape[1]} 维")
-        self.processed_df = processed_df
+        # 新增数据校验日志
+        print(f"[特征校验] 处理后数据形状: {processed_df.shape}")
+        print(f"[特征校验] 特征列匹配检查: {set(feature_columns).issubset(processed_df.columns)}")
         
-        # 标准化时仅使用特征列
+        # 标准化前检查
+        if processed_df[feature_columns].shape[0] == 0:
+            print("[致命错误] 空特征矩阵！可能原因：")
+            print("1. prepare_features返回空DataFrame")
+            print("2. 特征列不匹配")
+            print("3. 数据过滤过严")
+            print("4. 原始数据不足（当前长度 {}）".format(len(data)))
+        
         scaled_data = self.scaler.transform(processed_df[feature_columns].values)
         return scaled_data[-self.seq_length:]
     def _load_model(self):
@@ -122,19 +125,20 @@ class NNStrategy(BaseStrategy):
         
         # 重建标准化器（保持原有逻辑）
         self.scaler = StandardScaler()
-        self.scaler.mean_ = checkpoint['scaler_mean']
-        self.scaler.scale_ = checkpoint['scaler_scale']
-        
+        self.scaler.mean_ = checkpoint['scaler_mean']  # 新增均值加载
+        self.scaler.scale_ = checkpoint['scaler_scale']  # 新增标准差加载
         # 修正模型加载逻辑（关键修改点）
         # 从checkpoint直接获取输入维度（通过特征列数量）
         feature_columns = get_feature_columns()
+        print(f"\n[策略特征校验] 加载模型使用的特征数量: {len(feature_columns)}")
+        print("特征列表:", feature_columns)
         input_size = len(feature_columns)
         # 从checkpoint直接获取序列长度
-        self.seq_length = checkpoint['config']['seq_length']  # 替换原来的硬编码30
+        self.seq_length = 24  # 替换原来的硬编码30
         
         # 加载增强版模型结构（确保与训练器模型类一致）
         self.model = EnhancedSOLModel(input_size=input_size)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint['model_state_dict'])  # 添加缺失的权重加载
         self.model.eval()
         print(f"[NNStrategy] 增强模型加载完成，输入维度: {input_size}，序列长度: {self.seq_length}")
 
@@ -253,173 +257,62 @@ class NNStrategy(BaseStrategy):
         
     #     return any(risk_conditions)
 
+    def _generate_signal_probs(self, data):
+        """统一信号生成逻辑（与训练阶段保持一致）"""
+        # 数据预处理
+        features = self._prepare_features(data)
+        
+        # 创建序列（与训练阶段相同的逻辑）
+        seq_length = self.seq_length
+        if len(features) < seq_length:
+            return None, None
+        
+        # 取最近seq_length个特征
+        sequence = features[-seq_length:]
+        
+        # 转换为tensor
+        input_tensor = torch.FloatTensor(sequence).unsqueeze(0)  # 添加batch维度
+        
+        # 模型推理（禁用梯度计算）
+        with torch.no_grad():
+            output = self.model(input_tensor)
+            signal_prob = torch.sigmoid(output[0, 0]).item()  # 做多概率
+        
+        return signal_prob, 1 - signal_prob  # (做多概率, 做空概率)
+
+    # 修改on_bar方法
     def on_bar(self, data):
-        """接收最新行情数据并生成交易信号"""
-        print(f"[NNStrategy] 收到新K线数据，时间: {data.index[-1]}")
-
-        try:
-            # 确保数据格式统一（新增数据校验）
-            required_columns = ['open', 'high', 'low', 'close', 'volume']
-            if not all(col in data.columns for col in required_columns):
-                raise ValueError("数据格式异常，缺少必要字段")
-
-            # 统一时间索引处理（修复时间格式问题）
-            if not isinstance(data.index, pd.DatetimeIndex):
-                data = data.reset_index().rename(columns={'datetime': 'timestamp'})
-                data['timestamp'] = pd.to_datetime(data['timestamp'])
-                data = data.set_index('timestamp')
-
-            # 简化数据缓存逻辑（移除外部数据加载）
-            if not hasattr(self, 'cached_data') or self.cached_data.empty:
-                self.cached_data = data
-            else:
-                # 仅当收到新数据时追加（修复时间比较逻辑）
-                last_cached_time = self.cached_data.index[-1]
-                if data.index[-1] > last_cached_time:
-                    self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
-            
-            # 保留最近5倍序列长度的数据（原逻辑保留）
-            self.cached_data = self.cached_data[-self.seq_length*100:]
-            
-            # 数据长度检查（原逻辑保留）
-            if len(self.cached_data) < self.seq_length:
-                print(f"[NNStrategy] 数据不足，需要{self.seq_length}条，当前{len(self.cached_data)}条")
-                return 'HOLD', 0, (None, None)
-
-            # 统一截取指定长度的输入数据
-            input_data = self.cached_data[-self.seq_length:]
-            print(f"[INPUT] 统一输入长度: {len(input_data)}根K线")  # 新增调试日志
-
-            # 新增时间戳打印
-            print(f"[INPUT] 时间范围: {input_data.index[0]} ~ {input_data.index[-1]}")
-            print(f"[INPUT] 最新K线时间: {input_data.index[-1].strftime('%Y-%m-%d %H:%M:%S')}")
-            # 准备特征数据
-            features = self._prepare_features(input_data)
-            # print(f"[校验] 输入维度:{len(input_data)} | 缓存总量:{len(self.cached_data)}")
-            # print(f"[校验] 最早缓存时间:{self.cached_data.index[0]}") 
-            # print(f"[校验] 最新MA72值:{input_data['ma72'].iloc[-1]:.4f}")
-            # === 修改为直接使用 is_filter_data 函数 ===
-            # 获取最新K线的原始数据
-            last_open = self.cached_data['open'].iloc[-1]
-            last_high = self.cached_data['high'].iloc[-1]
-            last_low = self.cached_data['low'].iloc[-1]
-            last_close = self.cached_data['close'].iloc[-1]
-            print(f"[INPUT] 最新K线: {last_open:.2f} {last_high:.2f} {last_low:.2f} {last_close:.2f}")
-            # 修改数据获取后的处理逻辑（约218行附近）
-            # 直接调用过滤函数进行判断
-            if not is_filter_data(last_high, last_low, last_close, last_open):
-                print("[NNStrategy] 未通过过滤器条件，保持观望")
-                return 'HOLD', 0, (0, 0)
-            input_tensor = torch.FloatTensor(features).unsqueeze(0)
-            
-            with torch.no_grad():
-            # 新模型输出包含信号概率和价格参数
-                outputs = self.model(input_tensor).numpy()[0]
-
-             # 修改信号概率计算方式
-            signal_logits = outputs[:3]
-            signal_probs = np.exp(signal_logits)  # 将log概率转换为实际概率
-            signal_probs = signal_probs / signal_probs.sum()  # 确保概率和为1
-            
-            print(f"[DEBUG] 信号概率（观望/做多/做空）: {signal_probs}")
-            stop_loss = outputs[3]     # 止损比例
-            take_profit = outputs[4]    # 止盈比例
-            # 在计算signal_probs之后添加日志记录
-            # latest_kline = self.cached_data.iloc[-1]  # 获取最新完整K线
-            # self._log_signal(signal_probs, latest_kline)
-            # 获取预测信号 (取概率最高的类别)
-            signal_idx = 0
-            for idx in signal_probs:
-                if idx > 0.65:
-                    print(f"signal_probs is ===>{signal_probs}")
-                    signal_idx = np.argmax(signal_probs)
-            print(f"[DEBUG] 预测信号索引: {signal_idx}")
-            entry_price = data['close'].iloc[-1]
-            # 新增信号方向检查
-            current_signal = None
-            if signal_idx == 1:
-                current_signal = '做多'
-            elif signal_idx == 2:
-                current_signal = '做空'
-                
-            # 检查是否需要保持阻止状态
-            if self.last_blocked_signal and current_signal == self.last_blocked_signal:
-                print(f"[ALERT] 保持阻止 {current_signal} 信号")
-                return 'HOLD', 0, (0, 0, 100)
-            if signal_idx in [1, 2]:
-                current_features = self.processed_df.iloc[-1][get_feature_columns()].copy()
-                print(f"[特征校验] 输入数据长度: {len(self.processed_df)}")
-                print(f"MA24样本值: {self.processed_df['ma24'].iloc[-5:].values}")
-                class_idx = {label: idx for idx, label in enumerate(self.alert_model.classes_)}
-                prob = self.alert_model.predict_proba([current_features])[0][class_idx[1]]
-                suggestion = '允许交易' if prob < 0.65 else '建议观望'
-                print(f"[RISK] {'做多' if signal_idx ==1 else '做空'}风险概率: {prob:.2%}")
-                
-                if suggestion == '建议观望':
-                    # # 新增特征记录（添加风险概率）
-                    # feature_record = pd.DataFrame([current_features])
-                    # feature_record['timestamp'] = data.index[-1]  # 添加时间戳
-                    # feature_record['风险概率'] = prob  # 新增概率字段
-                    
-                    # risk_feature_path = os.path.join(self.log_dir, "risk_features.csv")
-                    
-                    # # 写入CSV文件（追加模式）
-                    # if not os.path.exists(risk_feature_path):
-                    #     feature_record.to_csv(risk_feature_path, index=False)
-                    # else:
-                    #     feature_record.to_csv(risk_feature_path, mode='a', header=False, index=False)
-
-                    # # 记录抑制事件（保持原有逻辑不变）
-                    # suppression_record = pd.DataFrame([{
-                    #     'timestamp': data.index[-1].strftime('%Y-%m-%d %H:%M:%S'),
-                    #     '信号类型': current_signal,
-                    #     '风险概率': f"{prob:.2%}",
-                    #     '建议操作': suggestion,
-                    #     '开仓价格': entry_price,
-                    #     '当前价格': data['close'].iloc[-1]
-                    # }])
-                    
-                    # # 保存到独立日志文件（修复追加模式）
-                    # suppression_log = os.path.join(self.log_dir, "suppression_records.xlsx")
-                    
-                    # # 使用with语句确保文件正确关闭
-                    # with pd.ExcelWriter(
-                    #     suppression_log,
-                    #     mode='a' if os.path.exists(suppression_log) else 'w',
-                    #     engine='openpyxl',
-                    #     if_sheet_exists='overlay'
-                    # ) as writer:
-                    #     suppression_record.to_excel(
-                    #         writer,
-                    #         index=False,
-                    #         header=not writer.sheets['Sheet1'].max_row > 0,
-                    #         startrow=writer.sheets['Sheet1'].max_row
-                    #     )
-
-                    # # 新增屏蔽时间打印
-                    self.last_blocked_signal = current_signal
-                    return 'HOLD', 0, (0, 0, 100)
-                else:
-                    self.last_blocked_signal = None  # 重置阻止状态
-            
-            # 生成交易信号（保持原有逻辑）
-            if signal_idx == 1:  # 做多
-                self.lastSignal = '做多'
-                return '做多', 0.5, (
-                    entry_price * (1 + take_profit * 10),
-                    entry_price * (1 - stop_loss * 10),
-                    100  # 添加持仓时间（小时）
-                )
-            elif signal_idx == 2:  # 做空
-                self.lastSignal = '做空'
-                return '做空', 0.5, (
-                    entry_price * (1 - take_profit * 10),
-                    entry_price * (1 + stop_loss * 10),
-                    100  # 添加持仓时间（小时）
-                )
-            else:  # 观望
-                return 'HOLD', 0, (0, 0, 100)
-
-        except Exception as e:
-            print(f"[NNStrategy] 处理K线时发生异常: {str(e)}")
+        """接收最新行情数据并生成交易信号（统一版）"""
+        # 更新数据缓存
+        if not hasattr(self, 'cached_data') or self.cached_data.empty:
+            self.cached_data = data
+        else:
+            last_cached_time = self.cached_data.index[-1]
+            if data.index[-1] > last_cached_time:
+                self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
+        
+        # 保留最近5倍序列长度的数据
+        self.cached_data = self.cached_data[-self.seq_length*5:]
+        
+        # 检查数据长度
+        if len(self.cached_data) < self.seq_length:
             return 'HOLD', 0, (None, None, None)
+        
+        # 统一信号生成
+        long_prob, short_prob = self._generate_signal_probs(self.cached_data)
+        print(f"[NNStrategy] 生成信号 - 做多概率: {long_prob:.2%}, 做空概率: {short_prob:.2%}")
+        # 生成交易信号（阈值与训练阶段一致）
+        entry_price = self.cached_data['close'].iloc[-1]
+        if long_prob > 0.5:  # 使用与训练相同的0.5阈值
+            return '做多', 1.0, (
+                entry_price * (1 + self.take_profit_pct),
+                entry_price * (1 - self.stop_loss_pct),
+                4  # 持仓时间（小时）
+            )
+        elif short_prob > 0.5:
+            return '做空', 1.0, (
+                entry_price * (1 - self.take_profit_pct),
+                entry_price * (1 + self.stop_loss_pct),
+                4
+            )
+        return 'HOLD', 0, (None, None, None)
