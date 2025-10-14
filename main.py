@@ -124,11 +124,11 @@ def main():
         except KeyboardInterrupt:
             print("\nStopping trading...")
             engine.stop()      
-    elif args.mode == 'quick_backtest':  # 新增模式7
-        start_date = datetime(2025, 9, 20)  # 可改为参数化
-        end_date = datetime(2025, 10, 6)
+    elif args.mode == 'qtest':  # 新增模式7
+        start_date = datetime(2025, 10, 1)  # 可改为参数化
+        end_date = datetime(2025, 10, 15)
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
-        report = engine.run_quick_backtest(start_date, end_date)
+        report = engine.run_qtest(start_date, end_date)
 
 if __name__ == "__main__":
     main()

@@ -71,7 +71,7 @@ class TradingEngine:
         self.holding_hours = 100  # 新增持仓时长配置
     
         # 在TradingEngine类中添加新方法
-    def run_quick_backtest(self, start_date, end_date):
+    def run_qtest(self, start_date, end_date):
         """实时回测（从交易所获取历史数据）"""
         # 强制使用交易所数据源
         self.data_adapter.source = 'binance'
