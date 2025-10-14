@@ -208,7 +208,7 @@ class TradingEngine:
                 print(f"symbol is ===>{symbol}")
                 # 计算时间范围（获取最近3天数据）
                 end_dt = datetime.now()
-                start_dt = end_dt - timedelta(days=3)
+                start_dt = end_dt - timedelta(days=5)
                 end_ts = int(end_dt.timestamp() * 1000)
                 start_ts = int(start_dt.timestamp() * 1000)
                 # 检查持仓时间

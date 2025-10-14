@@ -310,7 +310,7 @@ class NNStrategy(BaseStrategy):
                 4  # 持仓时间（小时）
             )
         elif short_prob > 0.5:
-            return '做空', 1.0, (
+            return '做多', 1.0, (
                 entry_price * (1 - self.take_profit_pct),
                 entry_price * (1 + self.stop_loss_pct),
                 4

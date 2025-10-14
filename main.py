@@ -125,7 +125,7 @@ def main():
             print("\nStopping trading...")
             engine.stop()      
     elif args.mode == 'qtest':  # 新增模式7
-        start_date = datetime(2025, 10, 1)  # 可改为参数化
+        start_date = datetime(2025, 9, 1)  # 可改为参数化
         end_date = datetime(2025, 10, 15)
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
         report = engine.run_qtest(start_date, end_date)
@@ -134,3 +134,24 @@ if __name__ == "__main__":
     main()
 
 #[DEBUG] 做多信号概率: [0.47886804]， 做空信号概率: [0.521132]
+
+# xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# [特征准备] 输入数据形状: (120, 12), 时间范围: 2025-10-09 05:00:00 - 2025-10-14 04:00:00
+# [特征校验] 处理后数据形状: (93, 16)
+# [特征校验] 特征列匹配检查: True
+# [NNStrategy] 生成信号 - 做多概率: 82.82%, 做空概率: 17.18%
+# [NNStrategy] 记录新信号: 做多 @ 202.03
+
+# === 平仓操作 ===
+# 时间: 2025-10-14 13:00
+# 类型: 做空信号改变平仓 | 价格: 202.0400
+# 入场价: 205.6200 | 盈亏: -3.5800
+# signal_info['price'] is ====>202.03
+# |验证价格是否在当前K线范围内|, entry_price is ==>202.03, current_price is ===>202.04, current_low is ===>201.59, current_high is ===>203.77
+
+# === 做多开仓 ===
+# 时间: 2025-10-14 13:00
+# 合约: SOL
+# 方向: 做多 | 价格: 202.0300
+# 数量: 49.4877 | 止盈: 206.0706 | 止损: 198.9995
+# 数据已经保存到SOL_trades_20251014_132352.xlsx
