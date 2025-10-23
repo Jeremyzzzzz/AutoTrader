@@ -125,8 +125,8 @@ def main():
             print("\nStopping trading...")
             engine.stop()      
     elif args.mode == 'qtest':  # 新增模式7
-        start_date = datetime(2025, 9, 1)  # 可改为参数化
-        end_date = datetime(2025, 10, 15)
+        start_date = datetime(2025, 5, 1)  # 可改为参数化
+        end_date = datetime(2025, 11, 15)
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
         report = engine.run_qtest(start_date, end_date)
 

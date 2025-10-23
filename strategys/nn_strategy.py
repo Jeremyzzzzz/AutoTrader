@@ -40,7 +40,7 @@ class NNStrategy(BaseStrategy):
         # self.alert_model = self._load_alert_model()  # 新增预警模型加载
         self.btc_symbol = config.get('btc_symbol', 'BTC_USDT_USDT')  # 新增BTC交易对
         self.processed_df = None
-        self.future_window = 4  # 与训练器保持一致
+        self.future_window = 2  # 与训练器保持一致
 
     def _load_alert_model(self):
         """加载训练好的风险预警模型"""
@@ -310,7 +310,7 @@ class NNStrategy(BaseStrategy):
                 4  # 持仓时间（小时）
             )
         elif short_prob > 0.5:
-            return '做多', 1.0, (
+            return '做空', 1.0, (
                 entry_price * (1 - self.take_profit_pct),
                 entry_price * (1 + self.stop_loss_pct),
                 4

@@ -12,6 +12,7 @@ import pandas as pd
 import json
 import os
 import matplotlib.pyplot as plt
+from torch.serialization import default_restore_location
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 from pandas.api.types import is_numeric_dtype
@@ -91,6 +92,7 @@ class SOLTrainer:
             path=config['data_path'],
             mode='backtest'
         )
+        torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
         self.timeframe = config['timeframe']
         self.batch_size = config.get('batch_size', 256)
         self.seq_length = config.get('seq_length', 24)
@@ -104,7 +106,7 @@ class SOLTrainer:
         self.current_fold = 0
         self.total_folds = self.cv_config.get('num_folds', 5)
         self._init_time_windows(config)
-        self.future_window = 4 #一小时
+        self.future_window = 2 #一小时
         self.scaler = StandardScaler()
         # 新增验证结果跟踪
         self.best_val_returns = []
@@ -283,7 +285,7 @@ class SOLTrainer:
         labels = df[['signal', 'stop_loss', 'take_profit', 'return_pct']].values
         
         return features, labels, df
-    def train_model(self, symbol, epochs=50):
+    def train_model(self, symbol, epochs=50, existing_model=None):
         # 合并加载训练集和验证集
         train_features, train_labels, _ = self.load_features(symbol, 'train')
         val_features, val_labels, _ = self.load_features(symbol, 'val')
@@ -327,7 +329,10 @@ class SOLTrainer:
                                 persistent_workers=True,
                                 prefetch_factor=2)
 
-        model = EnhancedSOLModel(len(get_feature_columns())).to(self.device)
+        if existing_model:
+            model = self.load_model(symbol, existing_model)
+        else:
+            model = EnhancedSOLModel(len(get_feature_columns())).to(self.device)
         optimizer = optim.AdamW([
             {'params': model.lstm.parameters(), 'lr': 0.001, 'weight_decay': 0.01},  # 新增L2正则
             {'params': model.attention.parameters(), 'lr': 0.001, 'weight_decay': 0.01},
@@ -588,10 +593,10 @@ class SOLTrainer:
         print(f"预测分布: 做多 {val_pred_dist[1]} | 做空 {val_pred_dist[0]}")
         return returns
 
-    def train(self, symbol='SOL_USDT_USDT', epochs=50, is_save=True, save_epoch_range=0):
+    def train(self, symbol='SOL_USDT_USDT', epochs=50, is_save=True, save_epoch_range=0, existing_model=None):
         if is_save:
             self.prepare_and_save_features(symbol)
-        model = self.train_model(symbol, epochs)
+        model = self.train_model(symbol, epochs, existing_model)
         
         model_dir = "model"
         os.makedirs(model_dir, exist_ok=True)
@@ -604,25 +609,22 @@ class SOLTrainer:
             'scaler_scale': self.scaler.scale_,
             'trained_epochs': epochs  # 记录总训练轮数
         }, final_model_path)
-        
-        # 新增指定范围保存逻辑
-        if save_epoch_range > 0:
-            start_epoch = max(0, epochs - save_epoch_range)
-            print(f"\n正在保存指定范围模型: Epoch {start_epoch+1}-{epochs}")
+
+    def load_model(self, symbol, model):
+        """加载已有模型参数"""
+        model_path = os.path.join("model", f"{symbol}_nn_model.pth")
+        if os.path.exists(model_path):
+            # 添加安全全局变量声明
+            torch.serialization.add_safe_globals([np.core.multiarray._reconstruct])
             
-            # 直接保存最后N个epoch的模型
-            for epoch_num in range(start_epoch, epochs):
-                model_path = os.path.join(
-                    model_dir, 
-                    f"{symbol}_nn_model_{epoch_num+1:03d}.pth"  # 使用三位数补齐
-                )
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'scaler_mean': self.scaler.mean_,
-                    'scaler_scale': self.scaler.scale_,
-                    'epoch': epoch_num+1
-                }, model_path)
-                print(f"模型已保存: {model_path}")
+            checkpoint = torch.load(
+                model_path, 
+                map_location=self.device,
+                weights_only=False  # 显式关闭安全加载
+            )
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"\n成功加载已有模型: {model_path}")
+        return model
 
         # 生成标签逻辑
     def generate_labels(self, symbol):
@@ -650,6 +652,7 @@ class SOLTrainer:
         val_labels.to_csv(f"{feature_dir}/{symbol}_val_labels_{timestamp_str}.csv")
         print(f"\n标签保存完成: {feature_dir}/{symbol}_[train/val]_labels_{timestamp_str}.csv")
 
+# 修改主函数部分
 if __name__ == "__main__":
     config_path = os.path.join(os.path.dirname(__file__), 'nnconfig.json')
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -666,24 +669,38 @@ if __name__ == "__main__":
         'cv_config': config.get('cv_config', {})
     })
     
-    # 交叉验证循环
+    # 修改后的训练循环
     for symbol in config['symbols']:
-        while True:
-            print(f"\n{'='*40}")
-            print(f"开始训练 {symbol} 模型 [Fold {trainer.current_fold+1}/{trainer.total_folds}]")
-            print(f"训练窗口: {trainer.train_start.date()} ~ {trainer.train_end.date()}")
-            print(f"验证窗口: {trainer.val_start.date()} ~ {trainer.val_end.date()}")
-            print(f"{'='*40}")
-            
-            # 训练并保存模型
-            trainer.train(symbol=symbol, epochs=config.get('epochs', 50), is_save=True, save_epoch_range=config.get('save_epoch_range', 0))
-            
-            
-            # 移动到下一个时间窗口
-            if not trainer.move_time_window():
+        total_epochs = config.get('epochs', 50)
+        model = None
+        
+        # 检查是否存在已有模型
+        model_path = os.path.join("model", f"{symbol}_nn_model.pth")
+        if os.path.exists(model_path):
+            load_choice = input("检测到已有模型，是否加载？(y/n): ")
+            if load_choice.lower() == 'y':
+                base_model = EnhancedSOLModel(len(get_feature_columns())).to(trainer.device)
+                model = trainer.load_model(symbol, base_model)
+        
+        # 首次训练或需要重新训练
+        if model is None:
+            print("\n开始全新训练...")
+            model = trainer.train(symbol=symbol, epochs=total_epochs, is_save=False)
+        else:
+            print(f"\n继续训练 (当前总轮次: {total_epochs})")
+            additional_epochs = int(input("请输入追加训练次数 (0退出): "))
+            if additional_epochs <= 0:
                 break
-                
-        # 输出交叉验证汇总报告
-        print("\n=== 交叉验证汇总 ===")
-        for i, (ret, epoch) in enumerate(zip(trainer.best_val_returns, trainer.best_epochs)):
-            print(f"Fold {i+1}: 最佳epoch={epoch} 验证收益={ret:.2%}")
+            model = trainer.train(symbol=symbol, epochs=additional_epochs, 
+                                    existing_model=model, is_save=False)
+            total_epochs += additional_epochs
+        
+        # 保存模型（新增保存校验）
+        if model:
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'scaler_mean': trainer.scaler.mean_,
+                'scaler_scale': trainer.scaler.scale_,
+                'total_epochs': total_epochs
+            }, model_path)
+            print(f"模型已更新: {model_path}")
