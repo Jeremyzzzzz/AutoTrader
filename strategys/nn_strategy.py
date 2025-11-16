@@ -19,16 +19,14 @@ class NNStrategy(BaseStrategy):
             'take_profit',
             'stop_loss'
         ])
-        self.model = None
-        self.scaler = None
+        self.models = []  # 改为模型列表
+        self.model_scalers = []  # 每个模型对应的scaler
+        self._load_models()  # 修改为加载多个模型
         self.seq_length = 24
-        print(f"[NNStrategy] 初始化策略，使用数据路径: {config.get('data_path')}")
-        self._load_model()
         # self._load_risk_model() 
         # 策略参数
-        self.trade_threshold = 0.015  # 1.5% 阈值
-        self.stop_loss_pct = 0.015    # 1.5% 止损
-        self.take_profit_pct = 0.02   # 2% 止盈
+        self.stop_loss_pct = 0.15    # 15% 止损
+        self.take_profit_pct = 0.2   # 20% 止盈
         self.last_blocked_signal = None
         # 初始化数据适配器
         self.data_adapter = data_adapter
@@ -40,8 +38,42 @@ class NNStrategy(BaseStrategy):
         # self.alert_model = self._load_alert_model()  # 新增预警模型加载
         self.btc_symbol = config.get('btc_symbol', 'BTC_USDT_USDT')  # 新增BTC交易对
         self.processed_df = None
-        self.future_window = 2  # 与训练器保持一致
+        self.future_window = 1  # 与训练器保持一致
 
+    def _load_models(self):
+        """加载多个预训练模型"""
+        print("[NNStrategy] 开始加载多模型...")
+        base_symbol = self.symbol.split('_')[0]
+        
+        # 模型配置（可移动到config中）
+        model_configs = [
+            {'suffix': 'nn_model_v1', 'seq_length': 24},
+            {'suffix': 'nn_model_v2', 'seq_length': 24}
+        ]
+        
+        for cfg in model_configs:
+            model_path = os.path.join('model', f"{base_symbol}_USDT_USDT_{cfg['suffix']}.pth")
+            
+            # 加载checkpoint
+            checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+            
+            # 初始化scaler
+            scaler = StandardScaler()
+            scaler.mean_ = checkpoint['scaler_mean']
+            scaler.scale_ = checkpoint['scaler_scale']
+            
+            # 初始化模型
+            model = EnhancedSOLModel(input_size=len(get_feature_columns()))
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.eval()
+            
+            self.models.append({
+                'model': model,
+                'scaler': scaler,
+                'seq_length': cfg['seq_length']
+            })
+            print(f"加载模型 {cfg['suffix']} 完成，序列长度: {cfg['seq_length']}")
+    
     def _load_alert_model(self):
         """加载训练好的风险预警模型"""
         import joblib
@@ -84,15 +116,21 @@ class NNStrategy(BaseStrategy):
 
     def _prepare_features(self, data):
         # 记录原始数据信息
-        print(f"[特征准备] 输入数据形状: {data.shape}, 时间范围: {data.index.min()} - {data.index.max()}")
-        valid_data = data.iloc[:-self.future_window] if len(data) > self.future_window else data
-        processed_df = prepare_features(valid_data)
+        valid_data = data.iloc[-self.seq_length:] if len(data) > self.future_window else data
+            # 新增时间校验日志
+        # print(f"[时间校验] 输入数据最新时间: {data.index[-1]} | 有效数据最新时间: {valid_data.index[-1]}")
+        
+        # 原有处理逻辑...
+        processed_df = prepare_features(data, window_mode=True)
         feature_columns = get_feature_columns()
         
         # 新增数据校验日志
         print(f"[特征校验] 处理后数据形状: {processed_df.shape}")
         print(f"[特征校验] 特征列匹配检查: {set(feature_columns).issubset(processed_df.columns)}")
-        
+        current_time = data.index[-1]
+    
+        # 在方法开头添加调试检查
+
         # 标准化前检查
         if processed_df[feature_columns].shape[0] == 0:
             print("[致命错误] 空特征矩阵！可能原因：")
@@ -140,6 +178,7 @@ class NNStrategy(BaseStrategy):
         self.model = EnhancedSOLModel(input_size=input_size)
         self.model.load_state_dict(checkpoint['model_state_dict'])  # 添加缺失的权重加载
         self.model.eval()
+        
         print(f"[NNStrategy] 增强模型加载完成，输入维度: {input_size}，序列长度: {self.seq_length}")
 
     def calculate_signals(self):
@@ -258,61 +297,135 @@ class NNStrategy(BaseStrategy):
     #     return any(risk_conditions)
 
     def _generate_signal_probs(self, data):
-        """统一信号生成逻辑（与训练阶段保持一致）"""
-        # 数据预处理
-        features = self._prepare_features(data)
+        """多模型一致预测"""
+        long_votes = 0
+        short_votes = 0
+        total_models = len(self.models)
+        idx = 1
+        for model_info in self.models:
+            # 使用模型专属的scaler
+            processed_df = prepare_features(data, window_mode=True)
+            scaled_data = model_info['scaler'].transform(processed_df[get_feature_columns()].values)
+            
+            # 截取适当长度
+            seq = scaled_data[-model_info['seq_length']:]
+            if len(seq) < model_info['seq_length']:
+                continue
+            
+            # 模型推理
+            input_tensor = torch.FloatTensor(seq).unsqueeze(0)
+            with torch.no_grad():
+                output = model_info['model'](input_tensor)
+                long_prob = torch.sigmoid(output[0, 0]).item()
+            #  # 新增调试保存逻辑（复用已计算的sequence）
+            # if str(data.index[-1]) == '2025-07-31 05:00:00':
+            #     # 逆标准化特征序列
+            #     feature_sequence = self.scaler.inverse_transform(seq)
+            #     debug_df = pd.DataFrame(
+            #         feature_sequence,
+            #         columns=get_feature_columns(),
+            #         index=data.index[-seq_length:]  # 使用原始数据的时间戳
+            #     )
+            #     # 添加概率信息
+            #     debug_df['prob_long'] = signal_prob
+            #     debug_df['prob_short'] = 1 - signal_prob
+                
+            #     save_path = f"debug/{data.index[-1].strftime('%Y%m%d%H%M%S')}_strategy.xlsx"
+            #     debug_df.to_excel(save_path, index_label='datetime')
+            #     print(f"[调试] 保存特征序列（{len(debug_df)}条）及概率至 {save_path}")
+            # 记录投票
+            print(f"  模型{idx}: 做多概率={long_prob:.2%}, 做空概率={1-long_prob:.2%}")
+            if long_prob > 0.5:
+                long_votes += 1
+            else:
+                short_votes += 1
+            idx = idx + 1
+             # 新增单个模型概率日志
+            # model_name = model_info['model'].get_name() if hasattr(model_info['model'], 'get_name') \
+            #             else f"model_v{idx}(seq={model_info['seq_length']})"
+            # print(f"  - {model_name}: 做多概率={long_prob:.2%}, 做空概率={1-long_prob:.2%}")
+        # 全体一致逻辑
+        if long_votes == total_models:
+            return 1.0, 0.0  # 全体做多
+        elif short_votes == total_models:
+            return 0.0, 1.0  # 全体做空
+        return 0.5, 0.5      # 存在分歧
+
+    def _save_debug_features(self, data):
+        """保存策略调试数据"""
+        # 使用prepare_features生成特征（与模型输入流程一致）
+        processed_df = prepare_features(data, window_mode=True)
+        feature_columns = get_feature_columns()
         
-        # 创建序列（与训练阶段相同的逻辑）
-        seq_length = self.seq_length
-        if len(features) < seq_length:
-            return None, None
         
-        # 取最近seq_length个特征
-        sequence = features[-seq_length:]
+        # 逆标准化时使用原始数据的时间戳
+        scaled_features = self.scaler.transform(feature_columns)
+        feature_df = pd.DataFrame(
+            self.scaler.inverse_transform(scaled_features),
+            columns=feature_columns,
+            index=data.index[-self.seq_length:]  # 关键修复：使用原始数据的时间戳
+        )
         
-        # 转换为tensor
-        input_tensor = torch.FloatTensor(sequence).unsqueeze(0)  # 添加batch维度
+        # 合并完整数据（包含原始K线+逆标准化特征）
+        debug_df = data.iloc[-self.seq_length:].join(feature_df, rsuffix='_scaled')
         
-        # 模型推理（禁用梯度计算）
+        # 使用实际模型输入进行推理验证
+        input_tensor = torch.FloatTensor(scaled_features).unsqueeze(0)
         with torch.no_grad():
             output = self.model(input_tensor)
-            signal_prob = torch.sigmoid(output[0, 0]).item()  # 做多概率
+            long_prob = torch.sigmoid(output[0, 0]).item()
         
-        return signal_prob, 1 - signal_prob  # (做多概率, 做空概率)
-
+        debug_df['prob_long'] = long_prob
+        debug_df['prob_short'] = 1 - long_prob
+        
+        # 保存文件
+        save_path = f"debug/{data.index[-1].strftime('%Y%m%d%H%M%S')}_strategy.xlsx"
+        debug_df.to_excel(save_path, index_label='datetime')
+        print(f"[调试] 保存{len(debug_df)}条数据，时间范围: {debug_df.index[0]} - {debug_df.index[-1]}")
     # 修改on_bar方法
     def on_bar(self, data):
-        """接收最新行情数据并生成交易信号（统一版）"""
+        """接收最新行情数据并生成交易信号（全体一致版）"""
+        print(f"[输入数据校验] 接收到数据最新时间: {data.index[-1]} | 数据长度: {len(data)}")
+        
+        # 新增数据截断逻辑（保留最近5倍序列长度）
+        max_history = max([m['seq_length'] for m in self.models]) * 5  # 取最大序列长度的5倍
+        data = data.iloc[-max_history:] if len(data) > max_history else data
+
         # 更新数据缓存
         if not hasattr(self, 'cached_data') or self.cached_data.empty:
             self.cached_data = data
         else:
             last_cached_time = self.cached_data.index[-1]
+            print(f"[缓存更新] 最后缓存时间: {last_cached_time} | 新数据时间: {data.index[-1]}")
             if data.index[-1] > last_cached_time:
-                self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]])
-        
-        # 保留最近5倍序列长度的数据
-        self.cached_data = self.cached_data[-self.seq_length*5:]
-        
-        # 检查数据长度
-        if len(self.cached_data) < self.seq_length:
+                # 合并新数据并截断
+                self.cached_data = pd.concat([self.cached_data, data.iloc[[-1]]]).iloc[-max_history:]
+                print(f"[缓存截断] 当前缓存长度: {len(self.cached_data)}")
+
+        # 检查数据长度（取所有模型需要的最大序列长度）
+        min_seq_length = max([m['seq_length'] for m in self.models])
+        if len(self.cached_data) < min_seq_length:
             return 'HOLD', 0, (None, None, None)
         
         # 统一信号生成
         long_prob, short_prob = self._generate_signal_probs(self.cached_data)
-        print(f"[NNStrategy] 生成信号 - 做多概率: {long_prob:.2%}, 做空概率: {short_prob:.2%}")
-        # 生成交易信号（阈值与训练阶段一致）
+        print(f"[NNStrategy] 模型共识 - 做多投票: {long_prob*100:.1f}%, 做空投票: {short_prob*100:.1f}%")
+        
+        # 生成交易信号（需要全体一致）
         entry_price = self.cached_data['close'].iloc[-1]
-        if long_prob > 0.5:  # 使用与训练相同的0.5阈值
+        if long_prob > 0.5:  # 当且仅当所有模型都给出做多信号
+            print(">>> 全体模型达成做多共识 <<<")
             return '做多', 1.0, (
                 entry_price * (1 + self.take_profit_pct),
                 entry_price * (1 - self.stop_loss_pct),
                 4  # 持仓时间（小时）
             )
-        elif short_prob > 0.5:
+        elif short_prob > 0.5:  # 当且仅当所有模型都给出做空信号
+            print(">>> 全体模型达成做空共识 <<<")
             return '做空', 1.0, (
                 entry_price * (1 - self.take_profit_pct),
                 entry_price * (1 + self.stop_loss_pct),
                 4
             )
+        print("!!! 模型存在分歧，保持观望 !!!")
         return 'HOLD', 0, (None, None, None)

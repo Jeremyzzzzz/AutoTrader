@@ -19,7 +19,8 @@ class DataAdapter:
         if source == self.SOURCE_LOCAL and path and not os.path.exists(path):
             os.makedirs(path)
 
-    def load_data(self, symbol, timeframe, start, end, btc_symbol=None):
+    def load_data(self, symbol, timeframe, start, end, btc_symbol=None, eth_symbol=None):
+
         """
         加载历史数据
         :param symbol: 交易对
@@ -37,6 +38,13 @@ class DataAdapter:
                 main_df = main_df.join(btc_df[['close']].rename(columns={'close': 'btc_close'}), how='left')
                 main_df['btc_close'].fillna(method='ffill', inplace=True)  # 前向填充
                 main_df['btc_close'].fillna(method='bfill', inplace=True)  # 后向填充
+            if eth_symbol:
+                # 加载ETH数据并合并
+                eth_df = self._load_from_local(eth_symbol, timeframe, start, end)
+                main_df = main_df.join(eth_df[['close']].rename(columns={'close': 'eth_close'}), how='left')
+                main_df['eth_close'].fillna(method='ffill', inplace=True)  # 前向填充
+                main_df['eth_close'].fillna(method='bfill', inplace=True)  # 后向填充
+
             return main_df
         
         elif self.source == self.SOURCE_BINANCE:
@@ -47,6 +55,13 @@ class DataAdapter:
                 main_df = main_df.join(btc_df[['close']].rename(columns={'close': 'btc_close'}), how='left')
                 main_df['btc_close'].fillna(method='ffill', inplace=True)  # 前向填充
                 main_df['btc_close'].fillna(method='bfill', inplace=True)  # 后向填充
+            if eth_symbol:
+                # 加载ETH数据并合并
+                eth_df = self._load_from_binance('ETHUSDT', timeframe, start, end)
+                main_df = main_df.join(eth_df[['close']].rename(columns={'close': 'eth_close'}), how='left')
+                main_df['eth_close'].fillna(method='ffill', inplace=True)  # 前向填充
+                main_df['eth_close'].fillna(method='bfill', inplace=True)  # 后向填充
+
             return main_df
         else:
             raise ValueError(f"Unsupported data source: {self.source}")

@@ -102,8 +102,8 @@ def main():
     
     if args.mode == 'backtest':
         # 回测配置
-        end_date = '2024-01-01'
-        start_date = '2025-08-01'
+        end_date = '2025-08-01'
+        start_date = '2025-05-01'
         
         print(f"Starting backtest for {args.symbol} from {start_date} to {end_date}")
         
@@ -126,7 +126,7 @@ def main():
             engine.stop()      
     elif args.mode == 'qtest':  # 新增模式7
         start_date = datetime(2025, 5, 1)  # 可改为参数化
-        end_date = datetime(2025, 11, 15)
+        end_date = datetime(2025, 12, 1)
         print(f"Starting realtime backtest for {args.symbol} from {start_date} to {end_date}")
         report = engine.run_qtest(start_date, end_date)
 

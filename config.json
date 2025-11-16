@@ -1,5 +1,6 @@
 {
-    "mode": "qtest",
+    "mode": "live",
+    "save_cache": true,
     "symbol": "SOL",
     "timeframe": "1h",
     "data_source": "local",

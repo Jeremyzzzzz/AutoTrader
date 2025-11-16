@@ -35,12 +35,6 @@ def calculate_atr(df, period=14):
 
 def calculate_macd(series, fast=12, slow=26, signal=9):
     """手动计算MACD指标"""
-    # 新增计算日志
-    calc_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data_start = series.index[0].strftime("%Y-%m-%d %H:%M") if not series.empty else "N/A"
-    data_end = series.index[-1].strftime("%Y-%m-%d %H:%M") if not series.empty else "N/A"
-    # print(f"\n[MACD计算日志] {calc_time} 计算数据范围: {data_start} 至 {data_end} (共{len(series)}条数据)")
-    
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
     macd = ema_fast - ema_slow
@@ -100,9 +94,12 @@ def get_feature_columns():
     """统一管理所有特征列（与训练代码完全一致）"""
     return [
         'open', 'high', 'low', 'close', 'volume',
-        'ma6', 'ma24', 'rsi_ma6', 'atr_macd',
+        'ma6', 'ma24', 'rsi_ma6',
         'atr', 'sol_btc_ratio', 'sol_btc_ratio_ma6',  # 新增SOL/BTC比率特征
-        'rsi', 'macd', 'macd_signal', 'volume_ratio'
+        'sol_eth_ratio', 'sol_eth_ratio_ma6',  # 新增SOL/ETH比率特征    
+        'rsi', 'volume_ratio','macd_signal','macd',
+        'price_change', 'price_change_abs', 'price_trend',
+        'rsi_momentum', 'macd_histogram'
     ]
 
 def generate_labels(data, future_window=4):
@@ -132,26 +129,6 @@ def generate_labels(data, future_window=4):
     
     return df[['signal', 'stop_loss', 'take_profit']]
 
-def generate_labels_v2(data, future_window=4):
-    """新版标签生成函数（基于未来4小时价格行为）"""
-    df = data.copy()
-    
-    # 计算未来价格极值
-    df['future_high'] = df['high'].rolling(future_window, min_periods=1).max().shift(-future_window)
-    df['future_low'] = df['low'].rolling(future_window, min_periods=1).min().shift(-future_window)
-    
-    # 生成信号（1: 做多，2: 做空）
-    price_change = df['close'].shift(-future_window) / df['close'] - 1
-    df['signal'] = np.where(price_change > 0.005, 1, np.where(price_change < -0.005, 2, 0))
-    
-    # 计算止损止盈（基于未来窗口波动）
-    df['stop_loss'] = (df['close'] - df['future_low']) / df['close']
-    df['take_profit'] = (df['future_high'] - df['close']) / df['close']
-    
-    # 过滤无效数据
-    df[['signal', 'stop_loss', 'take_profit']] = df[['signal', 'stop_loss', 'take_profit']].fillna(0)
-    return df[['signal', 'stop_loss', 'take_profit']]
-
 def generate_labels_from_csv(df, future_window=4):
     """基于完整CSV数据生成标签（存储绝对收益率）"""
     labels = pd.DataFrame(index=df.index)
@@ -176,7 +153,11 @@ def generate_labels_from_csv(df, future_window=4):
     
     return labels[['signal', 'stop_loss', 'take_profit', 'return_pct']].fillna(0)
 
-def prepare_features(data):
+def prepare_features(data, window_mode=False):
+
+    # min_length = 72  # 与策略序列长度一致
+    # if len(data) < min_length:
+    #     raise ValueError(f"特征生成需要至少{min_length}根K线，当前输入: {len(data)}")
     """纯特征生成函数"""
     df = data.copy()
     df.index = pd.to_datetime(df.index)
@@ -191,13 +172,23 @@ def prepare_features(data):
     
     # 动量指标
     df['rsi'] = calculate_rsi(df['close'], 14)
-    macd, macd_signal = calculate_macd(df['close'])
-    df['macd'] = macd
-    df['macd_signal'] = macd_signal
+
+    if window_mode:
+        window_size = 24
+        df['macd'] = df['close'].rolling(window=window_size, min_periods=window_size).apply(
+            lambda x: calculate_macd(pd.Series(x))[0].iloc[-1]
+        )
+        df['macd_signal'] = df['close'].rolling(window=window_size, min_periods=window_size).apply(
+            lambda x: calculate_macd(pd.Series(x))[1].iloc[-1]
+        )
+    else:
+        macd, macd_signal = calculate_macd(df['close'])
+        df['macd'] = macd
+        df['macd_signal'] = macd_signal
     
     # 特征交叉
     df['rsi_ma6'] = df['rsi'] * df['ma6']
-    df['atr_macd'] = df['atr'] * df['macd']
+    # df['atr_macd'] = df['atr'] * df['macd']
     
     # 成交量特征
     df['volume_ratio'] = np.log(df['volume'] / df['volume'].rolling(6).mean() + 1e-6)
@@ -206,121 +197,123 @@ def prepare_features(data):
     df['sol_btc_ratio'] = df['close'] / df['btc_close']
     df['sol_btc_ratio_ma6'] = df['sol_btc_ratio'].rolling(6).mean()
 
-    # === 新增策略信号 ===
-    # 1. 均线交叉策略（金叉/死叉）
-    df['ma_fast'] = df['close'].rolling(5).mean()  # 5周期均线
-    df['ma_slow'] = df['close'].rolling(20).mean() # 20周期均线
-    df['ma_cross'] = np.where(df['ma_fast'] > df['ma_slow'], 1, -1)
+    # SOL/ETH比率特征
+    df['sol_eth_ratio'] = df['close'] / df['eth_close']
+    df['sol_eth_ratio_ma6'] = df['sol_eth_ratio'].rolling(6).mean()
+
+
+    # # === 新增策略信号 ===
+    # # 1. 均线交叉策略（金叉/死叉）
+    # df['ma_fast'] = df['close'].rolling(5).mean()  # 5周期均线
+    # df['ma_slow'] = df['close'].rolling(20).mean() # 20周期均线
+    # df['ma_cross'] = np.where(df['ma_fast'] > df['ma_slow'], 1, -1)
     
-    # 2. 布林带策略
-    df['boll_mid'] = df['close'].rolling(20).mean()
-    df['boll_std'] = df['close'].rolling(20).std()
-    df['boll_upper'] = df['boll_mid'] + 2*df['boll_std']  # 上轨
-    df['boll_lower'] = df['boll_mid'] - 2*df['boll_std']  # 下轨
+    # # 2. 布林带策略
+    # df['boll_mid'] = df['close'].rolling(20).mean()
+    # df['boll_std'] = df['close'].rolling(20).std()
+    # df['boll_upper'] = df['boll_mid'] + 2*df['boll_std']  # 上轨
+    # df['boll_lower'] = df['boll_mid'] - 2*df['boll_std']  # 下轨
     
-    # 3. KDJ指标
-    low_min = df['low'].rolling(9).min()
-    high_max = df['high'].rolling(9).max()
-    rsv = (df['close'] - low_min) / (high_max - low_min + 1e-6) * 100
-    df['kdj_k'] = rsv.ewm(com=2).mean()          # K线
-    df['kdj_d'] = df['kdj_k'].ewm(com=2).mean() # D线
+    # # 3. KDJ指标
+    # low_min = df['low'].rolling(9).min()
+    # high_max = df['high'].rolling(9).max()
+    # rsv = (df['close'] - low_min) / (high_max - low_min + 1e-6) * 100
+    # df['kdj_k'] = rsv.ewm(com=2).mean()          # K线
+    # df['kdj_d'] = df['kdj_k'].ewm(com=2).mean() # D线
     
-    # 4. OBV能量潮
-    df['price_change'] = df['close'].diff()
-    df['obv'] = np.sign(df['price_change']) * df['volume']
-    df['obv'] = df['obv'].cumsum()
+    # # 4. OBV能量潮
+    # df['price_change'] = df['close'].diff()
+    # df['obv'] = np.sign(df['price_change']) * df['volume']
+    # df['obv'] = df['obv'].cumsum()
     
-    # 5. CCI信号
-    cci = calculate_cci(df['high'], df['low'], df['close'])
-    df['cci_signal'] = np.where(cci > 100, 1, np.where(cci < -100, -1, 0))
+    # # 5. CCI信号
+    # cci = calculate_cci(df['high'], df['low'], df['close'])
+    # df['cci_signal'] = np.where(cci > 100, 1, np.where(cci < -100, -1, 0))
     
-    # === 新增特征交互 ===
-    df['rsi_boll'] = df['rsi'] / (df['boll_upper'] - df['boll_lower'] + 1e-6)
+    # # === 新增特征交互 ===
+    # df['rsi_boll'] = df['rsi'] / (df['boll_upper'] - df['boll_lower'] + 1e-6)
 
 
 
 
 
 
-     # === 新增策略指标 ===
-    # 1. SuperTrend指标突破百分比
-    atr_multiplier = 3
-    hl2 = (df['high'] + df['low']) / 2
-    super_upper = hl2 + atr_multiplier * df['atr']
-    super_lower = hl2 - atr_multiplier * df['atr']
-    df['super_upper_pct'] = (df['close'] - super_upper) / df['close']  # 上轨突破幅度
-    df['super_lower_pct'] = (super_lower - df['close']) / df['close']  # 下轨突破幅度
+    #  # === 新增策略指标 ===
+    # # 1. SuperTrend指标突破百分比
+    # atr_multiplier = 3
+    # hl2 = (df['high'] + df['low']) / 2
+    # super_upper = hl2 + atr_multiplier * df['atr']
+    # super_lower = hl2 - atr_multiplier * df['atr']
+    # df['super_upper_pct'] = (df['close'] - super_upper) / df['close']  # 上轨突破幅度
+    # df['super_lower_pct'] = (super_lower - df['close']) / df['close']  # 下轨突破幅度
 
-    # 2. Donchian通道突破
-    donchian_window = 20
-    df['donchian_upper'] = df['high'].rolling(donchian_window).max()
-    df['donchian_lower'] = df['low'].rolling(donchian_window).min()
-    df['donchian_upper_pct'] = (df['close'] - df['donchian_upper']) / df['close']
-    df['donchian_lower_pct'] = (df['donchian_lower'] - df['close']) / df['close']
+    # # 2. Donchian通道突破
+    # donchian_window = 20
+    # df['donchian_upper'] = df['high'].rolling(donchian_window).max()
+    # df['donchian_lower'] = df['low'].rolling(donchian_window).min()
+    # df['donchian_upper_pct'] = (df['close'] - df['donchian_upper']) / df['close']
+    # df['donchian_lower_pct'] = (df['donchian_lower'] - df['close']) / df['close']
 
-    # 3. EMA交叉策略
-    df['ema12'] = df['close'].ewm(span=12).mean()
-    df['ema26'] = df['close'].ewm(span=26).mean()
-    df['ema_cross'] = np.where(df['ema12'] > df['ema26'], 1, -1)
+    # # 3. EMA交叉策略
+    # df['ema12'] = df['close'].ewm(span=12).mean()
+    # df['ema26'] = df['close'].ewm(span=26).mean()
+    # df['ema_cross'] = np.where(df['ema12'] > df['ema26'], 1, -1)
 
-    # 4. 抛物线转向SAR差异
-    sar = df['close'].copy()
-    af, ep = 0.02, df['close'].iloc[0]
-    for i in range(2, len(df)):
-        if df['close'].iloc[i] > ep:
-            ep = df['close'].iloc[i]
-            af = min(af + 0.02, 0.2)
-        else:
-            ep = df['close'].iloc[i]
-            af = max(af - 0.02, 0.02)
-        sar.iloc[i] = sar.iloc[i-1] + af * (ep - sar.iloc[i-1])
-    df['sar_diff'] = (df['close'] - sar) / df['close']
+    # # 4. 抛物线转向SAR差异
+    # sar = df['close'].copy()
+    # af, ep = 0.02, df['close'].iloc[0]
+    # for i in range(2, len(df)):
+    #     if df['close'].iloc[i] > ep:
+    #         ep = df['close'].iloc[i]
+    #         af = min(af + 0.02, 0.2)
+    #     else:
+    #         ep = df['close'].iloc[i]
+    #         af = max(af - 0.02, 0.02)
+    #     sar.iloc[i] = sar.iloc[i-1] + af * (ep - sar.iloc[i-1])
+    # df['sar_diff'] = (df['close'] - sar) / df['close']
 
-    # 5. VWAP偏离度
-    df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close'])/3).cumsum() / df['volume'].cumsum()
-    df['vwap_diff'] = (df['close'] - df['vwap']) / df['close']
+    # # 5. VWAP偏离度
+    # df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close'])/3).cumsum() / df['volume'].cumsum()
+    # df['vwap_diff'] = (df['close'] - df['vwap']) / df['close']
 
-    # RECORD_TIME = '2025-03-10 10:00:00'
-    # if not df.empty and df.index[-1] == pd.to_datetime(RECORD_TIME):
-    #     debug_data = df.loc[[RECORD_TIME]].copy()
-    #     debug_data['record_time'] = RECORD_TIME
-        
-    #     # === 新增详细特征记录 ===
-    #     feature_details = {
-    #         # 原始数据
-    #         'open': df.loc[RECORD_TIME, 'open'],
-    #         'high': df.loc[RECORD_TIME, 'high'],
-    #         'low': df.loc[RECORD_TIME, 'low'],
-    #         'close': df.loc[RECORD_TIME, 'close'],
-    #         'volume': df.loc[RECORD_TIME, 'volume'],
-            
-    #         # 技术指标
-    #         'rsi': df.loc[RECORD_TIME, 'rsi'],
-    #         'atr': df.loc[RECORD_TIME, 'atr'],
-    #         'macd': df.loc[RECORD_TIME, 'macd'],
-    #         'macd_signal': df.loc[RECORD_TIME, 'macd_signal'],
-    #         'macd_hist': df.loc[RECORD_TIME, 'macd'] - df.loc[RECORD_TIME, 'macd_signal'],
-            
-    #         # 移动平均
-    #         'ma6': df.loc[RECORD_TIME, 'ma6'],
-    #         'ma24': df.loc[RECORD_TIME, 'ma24'],
-            
-    #         # 特征交叉
-    #         'rsi_ma6': df.loc[RECORD_TIME, 'rsi_ma6'],
-    #         'atr_macd': df.loc[RECORD_TIME, 'atr_macd'],
-            
-    #         # 添加计算元数据
-    #         'calc_window': '24h',
-    #         'data_points': len(df),
-    #         'calc_time': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    #     }
-        
-    #     debug_data = pd.DataFrame([feature_details])
-    #     log_path = "feature_details_debug.csv"
-        
-    #     # 写入CSV（新增header处理）
-    #     write_header = not os.path.exists(log_path)
-    #     debug_data.to_csv(log_path, mode='a', header=write_header, index=False)
+  
+  
+    # # === 新增支撑压力特征 ===
+    # # 近期价格极值（24小时窗口）
+    # df['recent_high_72'] = df['high'].rolling(72).max()
+    # df['recent_low_72'] = df['low'].rolling(72).min()
+    
+    # # 压力支撑强度（距离百分比）
+    # df['resistance_strength'] = (df['recent_high_72'] - df['close']) / df['close']
+    # df['support_strength'] = (df['close'] - df['recent_low_72']) / df['close']
+    
+    # # 突破压力位信号（结合波动率过滤）
+    # df['breakout_signal'] = np.where(
+    #     (df['close'] > df['recent_high_72']) & (df['atr'] > df['atr'].rolling(72).mean()),
+    #     1, 0
+    # )
+    
+    # # 斐波那契回撤位（基于最近波动）
+    # swing_high = df['high'].rolling(48).max()
+    # swing_low = df['low'].rolling(48).min()
+    # df['fib_38'] = swing_low + (swing_high - swing_low) * 0.382
+    # df['fib_50'] = swing_low + (swing_high - swing_low) * 0.5
+    # df['fib_62'] = swing_low + (swing_high - swing_low) * 0.618
+
+        # 价格变化特征
+    df['price_change'] = df['close'].pct_change()
+    df['price_change_abs'] = df['price_change'].abs()
+    df['price_trend'] = df['price_change'].rolling(6).sum()
+
+    # # 支撑阻力特征
+    # df['resistance_level'] = df['high'].rolling(24).max()
+    # df['support_level'] = df['low'].rolling(24).min()
+    # df['distance_to_resistance'] = (df['resistance_level'] - df['close']) / df['close']
+    # df['distance_to_support'] = (df['close'] - df['support_level']) / df['close']
+
+    # # 动量确认特征
+    df['rsi_momentum'] = df['rsi'] - df['rsi'].shift(3)
+    df['macd_histogram'] = df['macd'] - df['macd_signal']
 
     return df[get_feature_columns()].dropna()  # 添加必要的原始列
     

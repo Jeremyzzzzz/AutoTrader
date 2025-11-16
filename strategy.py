@@ -38,8 +38,13 @@ class BaseStrategy(ABC):
         更新策略数据
         :param new_data: 新的K线数据 (DataFrame)
         """
-        # 合并新数据
-        self.data = pd.concat([self.data, new_data]).drop_duplicates().sort_index()
+        # 合并新数据（修复数据累积问题）
+        if not self.data.empty:
+            # 仅保留新数据中比现有数据新的部分
+            new_data = new_data[new_data.index > self.data.index[-1]]
+        
+        # 新增数据截断逻辑（保留最近72根K线）
+        self.data = pd.concat([self.data, new_data]).iloc[-72:].sort_index()
         
         # 计算信号
         self.calculate_signals()

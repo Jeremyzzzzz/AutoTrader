@@ -3,11 +3,12 @@
         "symbols": ["SOL_USDT_USDT"],
         "timeframe": "1h",
         "data_path": "回测结果训练集",
-        "epochs": 70,
-        "batch_size" : 256,
+        "epochs": 1000,
+        "batch_size" : 512,
         "seq_length": 24,
         "atr_period": 14,
         "rsi_period": 14,
+        "future_window": 1,
         "cv_config": {
             "num_folds": 1,
             "train_window_months": 48,
@@ -16,10 +17,27 @@
             "initial_train_start": "2020-01-01",
             "initial_train_end": "2025-05-01",
             "initial_val_start": "2025-05-01",
-            "initial_val_end": "2025-09-01"
+            "initial_val_end": "2025-11-01",
+            "initial_test_start": "2025-08-01",
+            "initial_test_end": "2025-11-01"
         },
         "early_stop_patience": 50,
         "save_epoch_range": 5,
-        "noise_filter_level": "high"
+        "noise_filter_level": "high",
+        "model_train": {
+        "loss_weights": {
+            "signal": 1,
+            "return": 200,
+            "smooth": 30,
+            "drawdown": 0.5
+        },
+        "auto_train": {
+            "target_acc": 0.55,
+            "max_drawdown": 0.1,
+            "max_retries": 1,
+            "conservative_rate_range": [0.3, 0.8]
+        }
+        
+    }
     }
 }

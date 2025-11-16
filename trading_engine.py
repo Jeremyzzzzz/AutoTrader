@@ -83,7 +83,8 @@ class TradingEngine:
             self.strategy.timeframe,
             start_date,
             end_date,
-            btc_symbol='BTC_USDT_USDT'  # 新增BTC数据参数
+            btc_symbol='BTC_USDT_USDT',  # 新增BTC数据参数
+            eth_symbol='ETH_USDT_USDT',  # 新增ETH数据参数
         )
         # 验证数据日期范围
         data_start = data.index.min()
@@ -100,18 +101,21 @@ class TradingEngine:
         # 清空历史记录
         self.positions = []
         self.trades = []
-        init_window = max(self.strategy.seq_length, 72)  # 取序列长度和特征窗口的较大值
+        init_window = 72  # 取序列长度和特征窗口的较大值
         # init_window = 72
         for i in range(init_window, len(data)):
 
             # 修改为仅使用已闭合K线（排除最新未闭合K线）
-            current_data = data.iloc[:i]  # 原为 data.iloc[:i]
+            window_start = max(0, i - init_window)
+            current_data = data.iloc[window_start:i]  # 取前72根K线
                 
             # 提前更新时间戳
             current_time = data.index[i]
             # 转换为北京时间 (UTC+8)
             current_time = current_time.tz_localize('UTC').tz_convert('Asia/Shanghai').tz_localize(None)
             print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+             # 新增调试日志
+            print(f"[回测窗口] 当前处理时间: {data.index[i]} | 输入窗口范围: {current_data.index[0]} ~ {current_data.index[-1]}, current_data size :{len(current_data)}")
             self.strategy.update_data(current_data)
             signal = self.strategy.get_latest_signal()
             trade_time = current_time  # 最后一根K线后1小时  
@@ -219,6 +223,7 @@ class TradingEngine:
                 # 分页获取K线数据（与winMoney.py保持一致）
                 klines = []
                 btc_klines = []
+                eth_klines = []
                 while True:
                     chunk = self.binance_client.futures_klines(
                         symbol=symbol,
@@ -248,18 +253,8 @@ class TradingEngine:
                     if not btc_chunk:
                         break
                     btc_klines.extend(btc_chunk)
-                    start_ts = chunk[-1][0] + 1  # 更新起始时间为最后一条K线时间+1ms
-                    if start_ts >= end_ts:
-                        break
                     # 主数据长度: 71 | BTC数据长度: 71
-# 合并后缺失值数量: 0
-# [NNStrategy] 收到新K线数据，时间: 70
-# [INPUT] 统一输入长度: 24根K线
-# [INPUT] 时间范围: 2025-07-22 17:00:00 ~ 2025-07-23 16:00:00
-# [INPUT] 最新K线时间: 2025-07-23 16:00:00
-# [INPUT] 最新K线: 192.73 192.74 187.91 188.28
-# [DEBUG] 信号概率（观望/做多/做空）: [1.13328555e-04 1.82985321e-01 8.16901326e-01]
-# signal_probs is ===>[1.13328555e-04 1.82985321e-01 8.16901326e-01]
+
                     # 修改数据获取后的处理逻辑（约218行附近）
                     btc_df = process_kline_data(btc_klines)
                     btc_df = btc_df[:-1] if self.mode == 'live' else btc_df  # 实盘模式排除最新未闭合K线
@@ -267,8 +262,6 @@ class TradingEngine:
                    # 合并数据并验证（关键修改）
                     df = df.join(btc_df[['close']].rename(columns={'close':'btc_close'}), how='left')
                     print("\n[数据合并验证]")
-                    print(f"主数据长度: {len(df)} | BTC数据长度: {len(btc_df)}")
-                    print(f"合并后缺失值数量: {df['btc_close'].isnull().sum()}")
                     # 新增时间戳验证逻辑
                     valid_timestamp = (
                         not df.empty 
@@ -278,17 +271,64 @@ class TradingEngine:
                     )
                     print(f"主数据首尾时间: {df.index[0]} - {df.index[-1]}")
                     print(f"BTC数据首尾时间: {btc_df.index[0]} - {btc_df.index[-1]}")
+                    
                     if not valid_timestamp:
                         self.logger.error("BTC数据与主数据时间戳不匹配，重新获取数据")
                         klines = []  # 清空已获取数据
                         btc_klines = []
                         continue  # 跳过后续处理，重新获取数据
+
+                    
+                    print("1111111111111111111111111111")
+                    eth_chunk = self.binance_client.futures_klines(
+                        symbol='ETHUSDT',
+                        interval=interval,
+                        startTime=start_ts,
+                        endTime=end_ts,
+                        limit=500
+                    )
+                    if not eth_chunk:
+                        print("ETH获取数据失败")
+                        break
+                    eth_klines.extend(eth_chunk)
+                    print("22222222222222222222222222222222")
+                    start_ts = chunk[-1][0] + 1  # 更新起始时间为最后一条K线时间+1ms
+                    if start_ts >= end_ts:
+                        break
+                    # 主数据长度: 71 | eth数据长度: 71
+                    print("33333333333333333333333333333333")
+                    # 修改数据获取后的处理逻辑（约218行附近）
+                    eth_df = process_kline_data(eth_klines)
+                    eth_df = eth_df[:-1] if self.mode == 'live' else eth_df  # 实盘模式排除最新未闭合K线
+                    eth_df = eth_df[-200:]  # 保留最近200根K线
+                    print("33333333333333333333333333333333")
+                   # 合并数据并验证（关键修改）
+                    df = df.join(eth_df[['close']].rename(columns={'close':'eth_close'}), how='left')
+                    print("\n[数据合并验证]")
+                    print(f"主数据长度: {len(df)} | eth数据长度: {len(eth_df)}")
+                    print(f"合并后缺失值数量: {df['eth_close'].isnull().sum()}")
+                    # 新增时间戳验证逻辑
+                    valid_timestamp = (
+                        not df.empty 
+                        and not eth_df.empty 
+                        and df.index[0] == eth_df.index[0] 
+                        and df.index[-1] == eth_df.index[-1]
+                    )
+                    print(f"主数据首尾时间: {df.index[0]} - {df.index[-1]}")
+                    print(f"eth数据首尾时间: {eth_df.index[0]} - {eth_df.index[-1]}")
+                    if not valid_timestamp:
+                        self.logger.error("eth数据与主数据时间戳不匹配，重新获取数据")
+                        klines = []  # 清空已获取数据
+                        eth_klines = []
+                        continue  # 跳过后续处理，重新获取数据
+
                     # 更新策略数据（保持原有逻辑）
                     self.strategy.update_data(df)
                 
                 # 获取信号（后续逻辑保持不变）
 
                 signal = self.strategy.get_latest_signal()
+                print(f"最新信号: {signal}")
                 if signal:
                     self._execute_real_trade(signal)
                 print(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -545,11 +585,7 @@ class TradingEngine:
                 price = signal_info['price'] * 1.001  # 当前价上方0.1%挂单
             else:
                 price = signal_info['price']
-
-            take_profit = signal_info['take_profit']
-            stop_loss = signal_info['stop_loss']
             signal_type = signal_info.get('signal_type', 'manual')  # 新增信号类型字段
-            take_profit = signal_info['take_profit']
             # 添加持仓时间记录
             self.entry_time = datetime.now()  # 记录入场时间
             self.holding_hours = signal_info.get('holding_time', 100)  # 默认2小时
@@ -557,8 +593,7 @@ class TradingEngine:
             # 从策略中获取止损止盈参数
 
             # 添加交易开始日志
-            self.logger.info(f"开始处理交易信号 | 类型: {signal_info['signal']} | 价格: {price:.4f} | "
-                           f"止盈: {take_profit:.4f} | 止损: {stop_loss:.4f}")
+            self.logger.info(f"开始处理交易信号 | 类型: {signal_info['signal']} | 价格: {price:.4f}")
             # 获取账户余额
             try:
                 positions = self.binance_client.futures_position_information()
@@ -600,7 +635,7 @@ class TradingEngine:
             usdt_balance = float([b for b in balance if b['asset'] == 'USDT'][0]['balance'])
             
             # 计算下单数量（使用账户余额的30%）
-            quantity = (1400) / price
+            quantity = (8700) / price
             
             # 获取交易精度
             exchange_info = self.binance_client.futures_exchange_info()
@@ -618,6 +653,8 @@ class TradingEngine:
             
             # 调整价格精度
             price = round(price - (price % tick_size), 8)
+            take_profit = signal_info.get('take_profit', 0)
+            stop_loss = signal_info.get('stop_loss', 0)
             stop_loss = round(stop_loss - (stop_loss % tick_size), 8)
             take_profit = round(take_profit - (take_profit % tick_size), 8)
 
